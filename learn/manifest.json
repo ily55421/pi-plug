@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "local.learn",
+  "name": "洞见回写",
+  "version": "0.2.0",
+  "description": "把会话里学到的工程洞见写进就近那一层的 AGENTS.md。宿主已经原生实现「读文件时带出该子树 AGENTS.md」，本插件只补它没有的回写半场：推荐该写哪一层、校验不像工程知识的输入、按 id 去重、超限拒绝而不静默截断。写入默认关闭，需要显式开启。只申请 agent.extension。",
+  "i18n": {
+    "en": {
+      "name": "Learn",
+      "description": "Writes durable engineering insights learned during a session into the closest AGENTS.md. The host already loads nested AGENTS.md per path, so this plugin only adds the missing write half: recommends which layer an insight belongs in, rejects input that is not project knowledge, skips exact duplicates, and refuses to silently truncate. Off by default. Declares only agent.extension.",
+      "safetyNotes": "Declares exactly one permission: agent.extension. File access goes through node:fs inside the agent sidecar, which fs.read/fs.write do not govern (spec: they gate the plugin API, not the process), so declaring them would be misleading rather than protective. learn_scope is read-only and never creates a file; learn_append refuses to write unless learnAppend is explicitly true. Every path is resolved segment-wise ('.' and '..' collapsed) and rejected unless it stays inside the session workspace, so it cannot write outside the project. It only ever touches AGENTS.md, AGENTS.override.md or CLAUDE.md, rejects insights that look like session detail (ids, timestamps) or obvious framework facts, is capped at 600 characters per insight and 32 KiB per file, and skips exact duplicates instead of appending them twice."
+    },
+    "zh-CN": {
+      "name": "洞见回写",
+      "description": "把会话里学到的工程洞见写进就近那一层的 AGENTS.md。宿主已经原生实现「读文件时带出该子树 AGENTS.md」，本插件只补它没有的回写半场：推荐该写哪一层、校验不像工程知识的输入、按 id 去重、超限拒绝而不静默截断。写入默认关闭，需要显式开启。",
+      "safetyNotes": "只声明一项权限：agent.extension。文件读写走 agent sidecar 内的 node:fs，而 fs.read/fs.write 并不管辖它（规范原文：它们管的是插件 API，不是进程），声明那两项只会误导而非提供保护。learn_scope 是只读的，绝不创建文件；learn_append 未显式开启 learnAppend 时拒绝写入。所有路径都做段级消解（折叠 '.' 与 '..'），不在会话工作区内一律拒绝，因此写不到项目外。它只会碰 AGENTS.md、AGENTS.override.md、CLAUDE.md 三个文件名；拒绝像会话细节（id、时间戳）或显然框架事实的内容；单条上限 600 字符、单文件上限 32 KiB；完全重复的洞见直接跳过。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": [
+    "productivity",
+    "developer-tools"
+  ],
+  "main": "main.js",
+  "contributes": {
+    "agentExtensions": [
+      "extension/index.mjs"
+    ],
+    "settings": [
+      {
+        "key": "learnAppend",
+        "title": "允许写入 AGENTS.md",
+        "description": "开启后 learn_append 才能把洞见写进就近那一层 AGENTS.md。默认关闭。",
+        "type": "boolean",
+        "default": false,
+        "scope": "plugin"
+      }
+    ]
+  },
+  "permissions": [
+    "agent.extension"
+  ],
+  "engines": {
+    "piDesktop": ">=0.15.1-beta.7"
+  },
+  "activationEvents": [
+    "onStartup"
+  ]
+}

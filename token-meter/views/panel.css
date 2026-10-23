@@ -1,0 +1,798 @@
+/*
+ * Token 计量 —— 停靠视图样式。
+ *
+ * 设计取向：常驻仪表盘，紧凑、克制、中性。不引入任何外部字体或图片，
+ * 只依赖系统字体与 CSS 变量，因此可以在 CSP 收紧的页面里直接跑。
+ *
+ * 主题：宿主不会注入 --pi-* 变量，只通过 pluginBridge 的
+ * "appearance:changed" / app.getAppearance 告知 base 是 light 还是 dark。
+ * 面板把结果写到 <html data-base="...">，这里按该属性切换配色。
+ */
+
+:root {
+  --bg: #1b1c1e;
+  --bg-raised: #212224;
+  --bg-sunken: #17181a;
+  --border: #303236;
+  --border-soft: #292b2f;
+  --fg: #e8e9ea;
+  --fg-muted: #9ba0a6;
+  --fg-faint: #6e7379;
+  --accent: #6ea8fe;
+  --accent-soft: rgba(110, 168, 254, 0.14);
+  --good: #58c08a;
+  --warn: #d9a343;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+html[data-base="light"] {
+  --bg: #ffffff;
+  --bg-raised: #f7f8f9;
+  --bg-sunken: #f1f2f4;
+  --border: #dfe2e6;
+  --border-soft: #e8eaed;
+  --fg: #1c1e21;
+  --fg-muted: #61666d;
+  --fg-faint: #8b9099;
+  --accent: #2563eb;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --good: #1f8a52;
+  --warn: #a86b12;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* 嵌入视图里该变量由宿主设为 0px；保留 var() 以便浮动面板模式下也正确。 */
+.wrap {
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--pi-plugin-titlebar-height, 0px));
+}
+
+/* ------------------------------------------------------------------ 头部 */
+
+.head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg);
+}
+
+.head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.head-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+  flex: 0 0 auto;
+  transform: translateY(-2px);
+}
+
+.head-status {
+  color: var(--fg-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.icon-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  background: var(--bg-raised);
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.icon-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.icon-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-button.spin svg {
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --------------------------------------------------------------- 滚动区 */
+
+.scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-gutter: stable;
+}
+
+/* ------------------------------------------------------------- 主指标 */
+
+.hero {
+  /* 同 .card：.scroll 里的项必须禁止收缩，否则内容会被压扁后裁掉。 */
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: 12px 14px 13px;
+}
+
+.hero-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
+}
+
+.hero-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 2px;
+}
+
+.approx {
+  font-size: 15px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+}
+
+.hero-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.hero-unit {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+}
+
+.hero-sub {
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.hero-sub .sep {
+  color: var(--fg-faint);
+}
+
+/* ---------------------------------------------------------------- 卡片 */
+
+/*
+ * 卡片。
+ *
+ * `flex: 0 0 auto` 是必须的，不是随手写的：.scroll 是 flex 列容器，而 flex 项默认
+ * `flex-shrink: 1`。内容比容器高时，卡片会被**压缩**而不是让 .scroll 滚动，
+ * 再叠加 overflow: hidden，超出的部分就被直接裁掉——表现是柱状图只剩一条缝、
+ * 模型列表被下一张卡片盖住。禁止收缩后，高度由内容决定，溢出交给 .scroll 滚动。
+ */
+.card {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.card-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.card-note {
+  font-size: 11px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 分项格子：宽时 3 列，窄时 2 列 */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.tile {
+  padding: 9px 12px;
+  border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  min-width: 0;
+}
+
+.tile:nth-child(3n) {
+  border-right: none;
+}
+
+.tile:nth-last-child(-n + 3) {
+  border-bottom: none;
+}
+
+.tile-label {
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tile-value {
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 行式指标 */
+.rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row-label {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.row-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------ 最近回复 */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.item:last-child {
+  border-bottom: none;
+}
+
+.item.is-latest {
+  background: var(--accent-soft);
+}
+
+.item-time {
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.item-out {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item-speed {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.item-speed .u {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--fg-muted);
+  margin-left: 2px;
+}
+
+.item-meta {
+  grid-column: 2 / -1;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 4px;
+  margin-right: 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 9.5px;
+  color: var(--fg-muted);
+  vertical-align: 1px;
+}
+
+/* -------------------------------------------------------------- 空状态 */
+
+.state {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px 20px;
+  text-align: center;
+}
+
+.state-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.state-body {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  max-width: 34ch;
+  line-height: 1.6;
+}
+
+.foot {
+  flex: 0 0 auto;
+  padding: 2px 2px 6px;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+}
+
+/* ------------------------------------------------------------- 响应式 */
+
+/* 窄面板：分项改 2 列，速度字号收敛 */
+@media (max-width: 420px) {
+  .tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tile:nth-child(3n) {
+    border-right: 1px solid var(--border-soft);
+  }
+
+  .tile:nth-child(2n) {
+    border-right: none;
+  }
+
+  .tile:nth-last-child(-n + 3) {
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .tile:nth-last-child(-n + 2) {
+    border-bottom: none;
+  }
+
+  .hero-value {
+    font-size: 26px;
+  }
+
+  .item {
+    grid-template-columns: auto 1fr;
+  }
+
+  .item-speed {
+    grid-column: 2;
+    text-align: left;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-button.spin svg {
+    animation: none;
+  }
+}
+
+/* ==========================================================================
+   累计看板（v0.3.0 新增）
+   --------------------------------------------------------------------------
+   三块内容：周期切换（日/月/年）、当前周期的四个主数字、柱状图与明细表。
+   配色沿用上面同一套变量，所以明暗主题不需要额外规则。
+   ========================================================================== */
+
+/* 周期切换：三个贴在一起的按钮，选中态用强调色。 */
+.seg {
+  display: flex;
+  gap: 4px;
+  padding: 10px 12px 0;
+}
+
+.seg-btn {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.seg-btn:hover {
+  color: var(--fg);
+  border-color: var(--border-strong, var(--border));
+}
+
+.seg-btn.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 四个主数字：两列，避免窄面板里数字被挤成两行。 */
+.tiles-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.tiles-4 .tile:nth-child(2n) {
+  border-right: none;
+}
+
+/* 柱状图：用 flex 排柱子，高度按占比给百分比。 */
+.chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 6px;
+}
+
+.chart-title {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.chart-note {
+  font-size: 11px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 84px;
+  padding: 0 12px 4px;
+  border-bottom: 1px solid var(--border-soft);
+  overflow-x: auto;
+}
+
+/*
+ * 单根柱子。0.4.0 起它是 <button>（点一下就把看板切到那一段时间），
+ * 所以必须把浏览器给按钮的默认外观全部清掉，否则会出现边框、背景与内边距，
+ * 把柱子挤成一个个小方块。
+ */
+.chart-bar {
+  flex: 1 0 8px;
+  min-width: 8px;
+  max-width: 40px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 3px 3px 0 0;
+}
+
+.chart-bar:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chart-fill {
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  background: var(--accent);
+  opacity: 0.75;
+  min-height: 2px;
+  transition: opacity 0.12s ease;
+}
+
+.chart-bar:hover .chart-fill {
+  opacity: 1;
+}
+
+/* 选中态：柱身用强调色描出来，与「当前周期」的绿色高亮区分开。 */
+.chart-bar.is-current {
+  background: var(--accent-soft);
+}
+
+.chart-bar.is-empty .chart-fill {
+  background: var(--border);
+  opacity: 0.5;
+}
+
+/*
+ * 当前周期那一根柱子（今天 / 本月 / 今年）。
+ *
+ * 0.4.0 起柱子粒度跟着周期走，所以高亮的不再一定是「今天」——切到月 / 年时
+ * 高亮的是本月 / 今年那根。类名从 is-today 改成 is-current 就是为这个；
+ * 旧类名保留一份，避免覆盖安装时新旧页面短暂并存导致高亮丢失。
+ */
+.chart-bar.is-current .chart-fill,
+.chart-bar.is-today .chart-fill {
+  background: var(--good);
+  opacity: 0.9;
+}
+
+/* 明细表 */
+.table-wrap {
+  padding: 8px 12px 0;
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--fg-faint);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+
+.table th.num,
+.table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr.is-clickable {
+  cursor: pointer;
+}
+
+/* 可点击行的键盘可达性：悬停已经会变底色，这里补焦点描边。 */
+.table tbody tr.is-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+
+.table tbody tr:hover td {
+  background: var(--bg-raised);
+}
+
+.table tbody tr.is-current td {
+  color: var(--accent);
+}
+
+.table-period {
+  font-variant-numeric: tabular-nums;
+}
+
+.table-more {
+  padding: 6px 12px 12px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+/* 模型列表：一行一个模型，左边名称右边数字，中间一条占比条。 */
+.model-list {
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-name {
+  font-size: 12px;
+  color: var(--fg);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-share {
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.model-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+
+.model-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.8;
+}
+
+.model-meta {
+  font-size: 11px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-empty {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+@media (max-width: 420px) {
+  .tiles-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chart {
+    height: 64px;
+  }
+
+  .table {
+    font-size: 11px;
+  }
+}

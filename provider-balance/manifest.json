@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "local.provider-balance",
+  "name": "供应商余额看板",
+  "version": "0.1.0",
+  "description": "直连九家供应商的余额与配额端点，把「还剩多少钱、配额用了多少、什么时候重置」集中到一个面板里：DeepSeek / OpenRouter / Moonshot / MiniMax / Vercel AI Gateway / OpenCode Go / OpenAI Codex。凭据只从本机 pi 的 auth.json 与 models.json 只读解析，请求只发往供应商官方域名。",
+  "i18n": {
+    "en": {
+      "name": "Provider Balance",
+      "description": "Queries the balance and quota endpoints of nine providers and puts \"how much is left, how much quota is used, when it resets\" on one panel: DeepSeek, OpenRouter, Moonshot, MiniMax, Vercel AI Gateway, OpenCode Go and OpenAI Codex. Credentials are read-only from the local pi auth.json and models.json; requests go only to each provider's official origin.",
+      "safetyNotes": "Reads credentials from the local pi agent directory (~/.pi/agent/auth.json and models.json) with Node's own fs — the host permission gateway does not mediate raw Node calls, which is the same trade-off pi.token-insights, local.token-meter and local.trajectory already make. It never writes to those files, never copies a key anywhere, and never logs one. Network requests go through the host's pi.net.fetch, confined by manifest.net.domains to the nine official provider origins; a provider configured with a custom baseUrl is refused rather than sent a key to a third-party host. The cached snapshot holds only balances, quota percentages and reset timestamps — no keys, tokens, account identifiers or message text. It declares no fs.*, no session.read, no agent tool and no clipboard permission."
+    },
+    "zh-CN": {
+      "name": "供应商余额看板",
+      "description": "直连九家供应商的余额与配额端点，把「还剩多少钱、配额用了多少、什么时候重置」集中到一个面板里：DeepSeek / OpenRouter / Moonshot / MiniMax / Vercel AI Gateway / OpenCode Go / OpenAI Codex。凭据只从本机 pi 的 auth.json 与 models.json 只读解析，请求只发往供应商官方域名。",
+      "safetyNotes": "用 Node 自身的 fs 从本机 pi 的 agent 目录（~/.pi/agent/auth.json 与 models.json）只读解析凭据——宿主的权限网关不介入原生 Node 调用，这是 pi.token-insights、local.token-meter、local.trajectory 已采用的同一取舍。它从不写回这两个文件，不把 key 复制到任何位置，也不记录到日志。网络请求走宿主的 pi.net.fetch，受 manifest.net.domains 限制在九家供应商的官方 origin 内；配置了自定义 baseUrl 的供应商会被直接拒绝查询，而不是把 key 发到第三方域名。缓存的快照里只有余额、配额百分比与重置时间——没有 key、token、账号标识或消息正文。不声明任何 fs.*、session.read、agent 工具与剪贴板权限。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": [
+    "productivity",
+    "developer-tools"
+  ],
+  "main": "main.js",
+  "net": {
+    "domains": [
+      "chatgpt.com",
+      "api.deepseek.com",
+      "openrouter.ai",
+      "api.moonshot.ai",
+      "api.moonshot.cn",
+      "api.minimax.io",
+      "api.minimaxi.com",
+      "ai-gateway.vercel.sh",
+      "opencode.ai"
+    ]
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "balance",
+        "title": {
+          "en": "Balances",
+          "zh-CN": "余额"
+        },
+        "entry": "views/index.html",
+        "order": 42
+      }
+    ],
+    "commands": [
+      {
+        "id": "providerBalance.open",
+        "title": "余额看板：查看供应商余额与配额",
+        "keywords": [
+          "balance",
+          "quota",
+          "credit",
+          "usage",
+          "余额",
+          "配额",
+          "额度",
+          "充值",
+          "看板"
+        ],
+        "category": "Data"
+      }
+    ]
+  },
+  "permissions": [
+    "ui.view",
+    "net.fetch"
+  ],
+  "engines": {
+    "piDesktop": ">=0.9.0"
+  },
+  "activationEvents": [
+    "onStartup"
+  ]
+}

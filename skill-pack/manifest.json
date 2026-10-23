@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "local.mcode-skill-pack",
+  "name": "MCode 技能包",
+  "version": "0.2.1",
+  "description": "从 MiniMax Code 方法论移植的一组纯提示词技能：元技能 skill-creator / skill-refiner（让 Agent 帮你把重复工作流沉淀成可复用技能）、结构化 compaction 摘要格式、项目 AGENTS.md 初始化、代码审查、深度研究、X 链接阅读、可视化页面。不注册任何工具、不申请文件与网络权限。",
+  "i18n": {
+    "en": {
+      "name": "MCode Skill Pack",
+      "description": "A set of prompt-only skills ported from MiniMax Code methodology: the meta-skills skill-creator / skill-refiner (so the agent can turn a repeated workflow into a reusable skill), the structured compaction summary format, AGENTS.md project init, code review, deep research, X link reading and visual pages. Registers no tools and requests no filesystem or network permission.",
+      "safetyNotes": "This plugin contributes instruction documents only. It declares the single permission agent.prompt.inject, which lets the skill catalog enter the agent's prompt; skill bodies are read on demand. It registers no agent tool, runs no command, reads no project file, makes no network request and stores nothing. The skills themselves only describe procedures — the agent still uses its normal, separately-permissioned tools when following them."
+    },
+    "zh-CN": {
+      "name": "MCode 技能包",
+      "description": "从 MiniMax Code 方法论移植的一组纯提示词技能：元技能 skill-creator / skill-refiner（让 Agent 帮你把重复工作流沉淀成可复用技能）、结构化 compaction 摘要格式、项目 AGENTS.md 初始化、代码审查、深度研究、X 链接阅读、可视化页面。不注册任何工具、不申请文件与网络权限。",
+      "safetyNotes": "本插件只提供指令文档。仅声明 agent.prompt.inject 一项权限，用于让技能目录进入 Agent 的提示词；技能正文按需读取。不注册任何 Agent 工具、不执行命令、不读取项目文件、不发起网络请求、不存储任何数据。技能本身只是流程说明——Agent 按技能执行时使用的仍是它自己那些另行授权的常规工具。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": ["productivity", "developer-tools"],
+  "main": "main.js",
+  "contributes": {
+    "skills": [
+      "skills/skill-creator.md",
+      "skills/skill-refiner.md",
+      "skills/context-summary-format.md",
+      "skills/project-init.md",
+      "skills/code-review.md",
+      "skills/deep-research.md",
+      "skills/x-link-reader.md",
+      "skills/visual-page.md"
+    ]
+  },
+  "permissions": ["agent.prompt.inject"],
+  "engines": {
+    "piDesktop": ">=0.9.0"
+  },
+  "activationEvents": ["onStartup"]
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN" data-base="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; font-src 'self' file:; connect-src 'none'; form-action 'none'; base-uri 'none'"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--
+    速度浮窗（ui.shape = "widget"）。宿主为它创建一个透明、无边框、置顶、
+    不进任务栏的窗口，并且：
+      · 不提供控制胶囊 —— 右键弹出宿主的「置顶 / 最小化 / 关闭」菜单；
+      · 整窗可由用户拖动（宿主注入 drag-region），插件无法自行设置坐标；
+      · --pi-plugin-titlebar-height 为 0px。
+    因此这一页刻意不放任何按钮：整块表面都是可拖动的，指针事件也交给宿主，
+    避免和拖动区域抢事件。
+  -->
+  <meta name="pi-plugin-chrome" content="v2" />
+  <title>Token 计量</title>
+  <link rel="stylesheet" href="widget.css" />
+</head>
+<body>
+  <div class="hud" id="hud">
+    <div class="row-speed">
+      <span class="approx" id="approx" hidden>≈</span>
+      <span class="value" id="value">—</span>
+      <span class="unit">tokens/s</span>
+    </div>
+    <div class="row-detail" id="detail">等待首次回复</div>
+    <div class="row-total" id="total"></div>
+  </div>
+  <script src="widget.js"></script>
+</body>
+</html>

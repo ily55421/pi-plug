@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; font-src 'self' file:; connect-src 'none'; form-action 'none'; base-uri 'none'"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--
+    停靠式工作面板视图。宿主把本页嵌进右侧工作面板，
+    并把 --pi-plugin-titlebar-height 设为 0px（浮动 panel 才是 46px），
+    所以这里不需要为拖拽带或窗口控制胶囊预留空间。
+  -->
+  <meta name="pi-plugin-chrome" content="v2" />
+  <title>REA 工具箱</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <div class="wrap">
+
+    <header class="head">
+      <div class="head-main">
+        <span class="head-title">REA 工具箱</span>
+        <span class="badge" id="versionBadge">—</span>
+      </div>
+      <div class="head-actions">
+        <button type="button" class="btn" id="copyBtn" title="复制全部工具名（含调用前缀）">复制清单</button>
+        <button type="button" class="btn" id="expandBtn" title="展开/折叠全部工具">展开</button>
+      </div>
+    </header>
+
+    <!-- 连接状态：MCP 服务器由宿主启动，这里只反映面板能观察到的信息 -->
+    <section class="status" id="statusBox">
+      <span class="dot" id="statusDot" aria-hidden="true"></span>
+      <span class="status-text" id="statusText">正在读取插件状态…</span>
+    </section>
+
+    <div class="toolbar">
+      <input
+        type="search"
+        id="search"
+        class="search"
+        placeholder="搜索工具名、说明、参数…"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <div class="groups" id="groups" role="tablist" aria-label="能力域"></div>
+    </div>
+
+    <div class="meta" id="meta"></div>
+
+    <main class="list" id="list" role="list"></main>
+
+    <footer class="foot" id="foot"></footer>
+  </div>
+
+  <!-- 离线目录：打包在插件内，随包发布，无需网络或文件读取权限 -->
+  <script src="catalog.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

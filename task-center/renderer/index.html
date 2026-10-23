@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="pi-plugin-chrome" content="v2" />
+    <title>任务中心</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --fg: #e9edf2;
+        --muted: color-mix(in oklab, #e9edf2 55%, transparent);
+        --faint: color-mix(in oklab, #e9edf2 34%, transparent);
+        --surface: color-mix(in oklab, #ffffff 4%, transparent);
+        --surface-hover: color-mix(in oklab, #ffffff 8%, transparent);
+        --border: color-mix(in oklab, #ffffff 11%, transparent);
+        --accent: #5b9dff;
+        --done: #4ec08d;
+        --danger: #e2685c;
+      }
+      :root[data-base="light"] {
+        color-scheme: light;
+        --fg: #1a1c1f;
+        --muted: color-mix(in oklab, #1a1c1f 58%, transparent);
+        --faint: color-mix(in oklab, #1a1c1f 38%, transparent);
+        --surface: color-mix(in oklab, #1a1c1f 4%, transparent);
+        --surface-hover: color-mix(in oklab, #1a1c1f 7%, transparent);
+        --border: color-mix(in oklab, #1a1c1f 12%, transparent);
+        --accent: #2f6fd0;
+        --done: #1f8f5f;
+        --danger: #b8443a;
+      }
+
+      * { box-sizing: border-box; }
+
+      /*
+       * 这是工作面板视图（views），不是独立面板：宿主把 titlebar 高度发布为
+       * 0px（面板才占 46px 拖拽带），回退值必须也是 0px，否则变量缺失时会
+       * 凭空多出一条 46px 的空白。视图里也没有窗口控制胶囊。
+       */
+      body {
+        margin: 0;
+        min-height: 100vh;
+        padding: var(--pi-plugin-titlebar-height, 0px) 0 0;
+        display: flex;
+        flex-direction: column;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        background: transparent;
+        color: var(--fg);
+        overflow: hidden;
+      }
+
+      .head {
+        flex: none;
+        padding: 12px 16px 10px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .head-row {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+
+      .head h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .head .count {
+        color: var(--muted);
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .bar {
+        margin-top: 8px;
+        height: 4px;
+        border-radius: 2px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+
+      .bar > i {
+        display: block;
+        height: 100%;
+        width: 0;
+        border-radius: 2px;
+        background: var(--done);
+        transition: width 240ms ease;
+      }
+
+      .current {
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .current .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+        flex: none;
+      }
+
+      .current .text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .scroll {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 10px 12px 20px;
+      }
+
+      ul.list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      li.item {
+        display: grid;
+        grid-template-columns: 18px 1fr auto;
+        gap: 8px;
+        align-items: start;
+        padding: 7px 9px;
+        border-radius: 7px;
+        border: 1px solid transparent;
+        transition: background 120ms ease;
+      }
+
+      li.item:hover { background: var(--surface-hover); }
+
+      li.item.active {
+        border-color: color-mix(in oklab, var(--accent) 45%, transparent);
+        background: color-mix(in oklab, var(--accent) 10%, transparent);
+      }
+
+      .glyph {
+        width: 16px;
+        height: 16px;
+        margin-top: 1px;
+        border-radius: 50%;
+        border: 1.5px solid var(--faint);
+        display: grid;
+        place-items: center;
+        font-size: 10px;
+        line-height: 1;
+        color: transparent;
+      }
+
+      li.item[data-status="in_progress"] .glyph {
+        border-color: var(--accent);
+        border-style: dashed;
+        animation: spin 6s linear infinite;
+      }
+
+      li.item[data-status="completed"] .glyph {
+        border-color: var(--done);
+        background: var(--done);
+        color: #fff;
+      }
+
+      li.item[data-status="cancelled"] .glyph {
+        border-color: var(--faint);
+        color: var(--faint);
+      }
+
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) {
+        li.item[data-status="in_progress"] .glyph { animation: none; }
+      }
+
+      .content {
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+
+      li.item[data-status="completed"] .content {
+        color: var(--muted);
+        text-decoration: line-through;
+        text-decoration-color: var(--faint);
+      }
+
+      li.item[data-status="cancelled"] .content {
+        color: var(--faint);
+        text-decoration: line-through;
+        text-decoration-color: var(--faint);
+      }
+
+      .prio {
+        font-size: 10px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        white-space: nowrap;
+        letter-spacing: 0.04em;
+      }
+
+      .prio[data-p="high"] { color: var(--danger); border-color: color-mix(in oklab, var(--danger) 42%, transparent); }
+      .prio[data-p="low"] { color: var(--faint); }
+
+      .empty {
+        margin: 28px 16px;
+        text-align: center;
+        color: var(--muted);
+      }
+
+      .empty p { margin: 0 0 6px; }
+      .empty .hint { color: var(--faint); font-size: 12px; }
+
+      .foot {
+        flex: none;
+        padding: 7px 16px;
+        border-top: 1px solid var(--border);
+        color: var(--faint);
+        font-size: 11px;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .legend { display: flex; gap: 10px; }
+      .legend span { display: inline-flex; align-items: center; gap: 4px; }
+      .legend i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+      .legend i.p { background: var(--faint); }
+      .legend i.a { background: var(--accent); }
+      .legend i.d { background: var(--done); }
+    </style>
+  </head>
+  <body>
+    <div class="head">
+      <div class="head-row">
+        <h1>任务中心</h1>
+        <span class="count" id="count">—</span>
+      </div>
+      <div class="bar"><i id="progress"></i></div>
+      <div class="current" id="currentRow" hidden>
+        <span class="dot"></span>
+        <span class="text" id="currentText"></span>
+      </div>
+    </div>
+
+    <div class="scroll">
+      <ul class="list" id="list"></ul>
+      <div class="empty" id="empty" hidden>
+        <p>还没有任务清单</p>
+        <p class="hint">让 Agent 开始一个多步任务，它会用 todo_write 建清单</p>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span class="legend">
+        <span><i class="p"></i>待办</span>
+        <span><i class="a"></i>进行中</span>
+        <span><i class="d"></i>已完成</span>
+      </span>
+      <span id="updated">—</span>
+    </div>
+
+    <script>
+      /*
+       * 视图页没有 `pi` 对象，只有 window.pluginBridge。插件进程把清单写进
+       * 插件设置（todoState），这里轮询 plugin.getSettings 渲染。
+       * 本文件对宿主只读：从不写设置、不发网络请求。
+       *
+       * 所有任务文本一律用 textContent 写入，模型产出的内容不经过 HTML 解析。
+       */
+      (function () {
+        "use strict";
+
+        const bridge = window.pluginBridge || null;
+        const KEY_STATE = "todoState";
+
+        /** 面板可见时 1.5s，隐藏时 6s：面板常常可见但没有焦点。 */
+        const POLL_MS = 1500;
+        const POLL_HIDDEN_MS = 6000;
+        /** 主题变化的复查节奏。工作面板视图收不到 appearance:changed 推送，
+         *  所以只能定期重新问一次宿主。 */
+        const APPEARANCE_POLL_MS = 5000;
+
+        const $ = (id) => document.getElementById(id);
+        const state = {
+          todos: [],
+          updatedAt: null,
+          renderKey: null,
+          timer: null,
+          appearanceTimer: null,
+        };
+
+        const STATUS_ORDER = { in_progress: 0, pending: 1, completed: 2, cancelled: 3 };
+
+        function applyAppearance(appearance) {
+          const base = appearance && appearance.base;
+          const resolved =
+            base === "light" || base === "dark"
+              ? base
+              : window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          if (document.documentElement.dataset.base !== resolved) {
+            document.documentElement.dataset.base = resolved;
+          }
+        }
+
+        function stamp(ms) {
+          const n = Number(ms);
+          if (!Number.isFinite(n) || n <= 0) return "—";
+          const d = new Date(n);
+          if (Number.isNaN(d.getTime())) return "—";
+          const hh = String(d.getHours()).padStart(2, "0");
+          const mm = String(d.getMinutes()).padStart(2, "0");
+          return d.getMonth() + 1 + "月" + d.getDate() + "日 " + hh + ":" + mm;
+        }
+
+        /** 排序：进行中 → 待办 → 已完成 → 已取消；同组内保持模型给的顺序。 */
+        function ordered(todos) {
+          return todos
+            .map((todo, index) => ({ todo, index }))
+            .sort((a, b) => {
+              const sa = STATUS_ORDER[a.todo.status] ?? 9;
+              const sb = STATUS_ORDER[b.todo.status] ?? 9;
+              if (sa !== sb) return sa - sb;
+              return a.index - b.index;
+            })
+            .map((entry) => entry.todo);
+        }
+
+        function render() {
+          const todos = state.todos;
+          const key = JSON.stringify([todos, state.updatedAt]);
+          if (key === state.renderKey) return;
+          state.renderKey = key;
+
+          const done = todos.filter((t) => t.status === "completed").length;
+          const total = todos.length;
+          const percent = total === 0 ? 0 : Math.round((done / total) * 100);
+          const active = todos.find((t) => t.status === "in_progress") || null;
+
+          $("count").textContent = total === 0 ? "—" : done + " / " + total + " · " + percent + "%";
+          $("progress").style.width = percent + "%";
+          $("updated").textContent = state.updatedAt ? "更新于 " + stamp(state.updatedAt) : "—";
+
+          const currentRow = $("currentRow");
+          if (active) {
+            currentRow.hidden = false;
+            $("currentText").textContent = active.content;
+          } else {
+            currentRow.hidden = true;
+          }
+
+          const list = $("list");
+          list.textContent = "";
+          for (const todo of ordered(todos)) {
+            const li = document.createElement("li");
+            li.className = "item" + (todo.status === "in_progress" ? " active" : "");
+            li.dataset.status = todo.status;
+
+            const glyph = document.createElement("span");
+            glyph.className = "glyph";
+            glyph.textContent = todo.status === "completed" ? "✓" : todo.status === "cancelled" ? "×" : "";
+
+            const content = document.createElement("span");
+            content.className = "content";
+            content.textContent = todo.content;
+
+            const prio = document.createElement("span");
+            prio.className = "prio";
+            prio.dataset.p = todo.priority;
+            prio.textContent = todo.priority === "high" ? "高" : todo.priority === "low" ? "低" : "中";
+
+            li.append(glyph, content, prio);
+            list.append(li);
+          }
+
+          $("empty").hidden = total > 0;
+        }
+
+        async function refresh() {
+          if (!bridge || typeof bridge.invoke !== "function") return;
+          try {
+            const settings = (await bridge.invoke("plugin.getSettings")) || {};
+            const stored = settings[KEY_STATE] || {};
+            state.todos = Array.isArray(stored.todos) ? stored.todos : [];
+            state.updatedAt = stored.updatedAt || null;
+            render();
+          } catch {
+            // 读失败就保持上一帧，下一次轮询重试。
+          }
+        }
+
+        function schedule() {
+          if (state.timer) clearTimeout(state.timer);
+          const delay = document.hidden ? POLL_HIDDEN_MS : POLL_MS;
+          state.timer = setTimeout(async () => {
+            await refresh();
+            schedule();
+          }, delay);
+        }
+
+        /** 视图收不到 appearance:changed 推送，只能定期重新问宿主。 */
+        async function refreshAppearance() {
+          if (!bridge || typeof bridge.invoke !== "function") {
+            applyAppearance(null);
+            return;
+          }
+          try {
+            applyAppearance(await bridge.invoke("app.getAppearance"));
+          } catch {
+            applyAppearance(null);
+          }
+        }
+
+        document.addEventListener("visibilitychange", () => {
+          schedule();
+          void refreshAppearance();
+        });
+
+        void refreshAppearance();
+        state.appearanceTimer = setInterval(refreshAppearance, APPEARANCE_POLL_MS);
+        void refresh().then(schedule);
+      })();
+    </script>
+  </body>
+</html>

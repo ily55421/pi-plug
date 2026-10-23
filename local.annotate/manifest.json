@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "local.annotate",
+  "name": "页面标注",
+  "version": "0.1.0",
+  "description": "教 agent 在网页上做可视化标注：用宿主内置 Browser 工具注入 Shadow DOM 序号徽章与高亮框，截图回传，产出带编号的问题报告。零 UI、零工具注册，纯提示词技能。",
+  "i18n": {
+    "en": {
+      "name": "Page Annotate",
+      "description": "Teaches the agent to visually annotate web pages: inject Shadow DOM numbered badges and highlight boxes via the built-in Browser tool, screenshot, and produce a numbered issue report. No UI, no registered tools — a pure prompt skill.",
+      "safetyNotes": "Declarative-only plugin: it contributes one instruction document and registers no tools, panels, or background services. The skill directs the agent to use the host's built-in Browser tool; every browser action therefore remains under the host's own permission gateway. This plugin reads no files, makes no network requests, and writes nothing."
+    },
+    "zh-CN": {
+      "name": "页面标注",
+      "description": "教 agent 在网页上做可视化标注：用宿主内置 Browser 工具注入 Shadow DOM 序号徽章与高亮框，截图回传，产出带编号的问题报告。零 UI、零工具注册，纯提示词技能。",
+      "safetyNotes": "纯声明式插件：只贡献一份技能指令文档，不注册任何工具、面板或后台服务。技能指导 agent 使用宿主内置的 Browser 工具，因此所有浏览器操作仍受宿主自身权限网关管控。本插件不读文件、不联网、不写入任何位置。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": ["developer-tools", "local"],
+  "main": "main.js",
+  "contributes": {
+    "skills": [
+      "skills/dom-annotate.md"
+    ]
+  },
+  "permissions": [
+    "agent.prompt.inject"
+  ],
+  "engines": {
+    "piDesktop": ">=0.9.0"
+  },
+  "activationEvents": [
+    "onStartup"
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "local.trajectory",
+  "name": "轨迹回放",
+  "version": "0.1.0",
+  "description": "把历史会话回放成时间线：按用户消息推导的 turn 分组、工具调用链、思考块、逐轮 token/时长徽章与可拖动的播放头。只读本地会话转录本，不联网、不写入宿主数据。",
+  "i18n": {
+    "en": {
+      "name": "Trajectory",
+      "description": "Replays any recorded session as a timeline: turns derived from user messages, tool-call chains, thinking blocks, per-turn token/duration badges and a draggable playhead. Reads local session transcripts only; no network, no host data writes.",
+      "safetyNotes": "Read-only and fully local. The plugin process reads ~/.pi-desktop/sessions transcripts with Node's own fs (the host permission gateway does not mediate raw Node calls), so this plugin declares no fs.read or session.read and never writes anything outside its own cache directory. It also opens ~/.pi-desktop/pi.sqlite read-only to align with host facts: the sessions table provides sidebar titles and deleted flags, and the messages table provides the most recent human message (used to detect the current session); on any read failure it degrades to its own index and never re-queries. It never makes network requests. The cache it keeps under its own plugin data directory contains message previews (max 160 chars per block) and byte offsets; full message content is read from the transcript on demand, never copied elsewhere. No cost data exists in the host records, so none is shown."
+    },
+    "zh-CN": {
+      "name": "轨迹回放",
+      "description": "把历史会话回放成时间线：按用户消息推导的 turn 分组、工具调用链、思考块、逐轮 token/时长徽章与可拖动的播放头。只读本地会话转录本，不联网、不写入宿主数据。",
+      "safetyNotes": "只读、完全本地。插件进程用 Node 自身的 fs 读取 ~/.pi-desktop/sessions 的会话转录本（宿主权限网关不介入原生 Node 调用），因此不声明 fs.read / session.read，除自己的缓存目录外不写入任何位置；同时以只读方式打开 ~/.pi-desktop/pi.sqlite 对齐宿主事实：sessions 表提供侧栏标题与删除标记，messages 表提供最近一条真人输入（用于判定当前会话），任何读取失败都自动降级到自身索引、不再查询。不发起任何网络请求。缓存放自己的插件数据目录，只包含每块最长 160 字的预览与字节偏移；完整消息内容按需从转录本原位读取，不复制到别处。宿主记录中不存在费用数据，因此本插件不显示任何费用。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": ["developer-tools", "local"],
+  "main": "main.js",
+  "contributes": {
+    "views": [
+      {
+        "id": "trajectory",
+        "title": {
+          "en": "Trajectory",
+          "zh-CN": "轨迹回放"
+        },
+        "entry": "views/index.html",
+        "order": 50
+      }
+    ],
+    "commands": [
+      {
+        "id": "local.trajectory.rebuild",
+        "title": "轨迹回放：重建全部会话索引",
+        "keywords": ["trajectory", "replay", "session", "timeline", "轨迹", "回放", "索引"],
+        "category": "Data"
+      }
+    ]
+  },
+  "permissions": ["ui.view"],
+  "engines": {
+    "piDesktop": ">=0.9.0"
+  },
+  "activationEvents": ["onStartup"]
+}

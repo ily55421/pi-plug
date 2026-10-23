@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN" data-base="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; font-src 'self' file:; connect-src 'none'; form-action 'none'; base-uri 'none'"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--
+    停靠式工作面板视图。宿主把本页嵌入右侧工作面板，并同步把
+    --pi-plugin-titlebar-height 设为 0px（浮动 panel 才是 46px），
+    所以这里不需要为拖拽带或窗口控制胶囊预留任何空间。
+  -->
+  <meta name="pi-plugin-chrome" content="v2" />
+  <title>Token 计量</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <div class="wrap" id="wrap">
+
+    <header class="head">
+      <div class="head-main">
+        <span class="head-title" id="headTitle">Token 计量</span>
+        <span class="dot" aria-hidden="true"></span>
+        <span class="head-status" id="headStatus"></span>
+      </div>
+      <button type="button" class="icon-button" id="refreshBtn" title="刷新">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+          <path d="M21 3v5h-5" />
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+          <path d="M8 16H3v5" />
+        </svg>
+      </button>
+    </header>
+
+    <!-- 状态：加载中 / 无数据 / 出错 -->
+    <div class="state" id="stateBox" hidden>
+      <div class="state-title" id="stateTitle"></div>
+      <div class="state-body" id="stateBody"></div>
+    </div>
+
+    <main class="scroll" id="scroll" hidden>
+
+      <!-- 主指标：最近一次回复的生成速度 -->
+      <section class="hero" id="hero">
+        <div class="hero-label" id="heroLabel">生成速度</div>
+        <div class="hero-value-row">
+          <span class="approx" id="heroApprox" hidden>≈</span>
+          <span class="hero-value" id="heroValue">—</span>
+          <span class="hero-unit">tokens/s</span>
+        </div>
+        <div class="hero-sub" id="heroSub"></div>
+      </section>
+
+      <!-- 累计看板：年 / 月 / 日三级累计 + 柱状图 + 模型明细 -->
+      <section class="card" id="boardCard">
+        <div class="card-head">
+          <span class="card-title" id="boardTitle">累计看板</span>
+          <span class="card-note" id="boardNote"></span>
+        </div>
+
+        <!-- 周期切换：日 / 月 / 年 -->
+        <div class="seg" id="boardSeg" role="tablist">
+          <button type="button" class="seg-btn" data-scope="day" role="tab">日</button>
+          <button type="button" class="seg-btn" data-scope="month" role="tab">月</button>
+          <button type="button" class="seg-btn" data-scope="year" role="tab">年</button>
+        </div>
+
+        <!-- 当前周期的四个主数字 -->
+        <div class="tiles tiles-4" id="scopeTiles">
+          <div class="tile">
+            <div class="tile-label">消耗总量</div>
+            <div class="tile-value" id="scopeTotal">—</div>
+          </div>
+          <div class="tile">
+            <div class="tile-label">回复条数</div>
+            <div class="tile-value" id="scopeReplies">—</div>
+          </div>
+          <div class="tile">
+            <div class="tile-label">平均速度</div>
+            <div class="tile-value" id="scopeAvg">—</div>
+          </div>
+          <div class="tile">
+            <div class="tile-label">累计用时</div>
+            <div class="tile-value" id="scopeDuration">—</div>
+          </div>
+        </div>
+
+        <!-- 柱状图：最近 N 天的消耗趋势 -->
+        <div class="chart-head">
+          <span class="chart-title" id="chartTitle">每日消耗趋势</span>
+          <span class="chart-note" id="chartNote"></span>
+        </div>
+        <div class="chart" id="chart"></div>
+
+        <!-- 明细表：按周期列出每一天 / 每一月 / 每一年 -->
+        <div class="table-wrap">
+          <table class="table" id="boardTable">
+            <thead>
+              <tr>
+                <th id="thPeriod">周期</th>
+                <th class="num" id="thTotal">总量</th>
+                <th class="num" id="thReplies">条数</th>
+                <th class="num" id="thAvg">平均速度</th>
+                <th class="num" id="thDuration">用时</th>
+              </tr>
+            </thead>
+            <tbody id="boardBody"></tbody>
+          </table>
+        </div>
+        <div class="table-more" id="boardMore" hidden></div>
+      </section>
+
+      <!-- 按模型统计 -->
+      <section class="card" id="modelsCard">
+        <div class="card-head">
+          <span class="card-title" id="modelsTitle">模型用量</span>
+          <span class="card-note" id="modelsNote"></span>
+        </div>
+        <div class="model-list" id="modelList"></div>
+      </section>
+
+      <!-- 最近一次回复的分项 -->
+      <section class="card">
+        <div class="card-head">
+          <span class="card-title" id="latestTitle">最近一次回复</span>
+          <span class="card-note" id="latestNote"></span>
+        </div>
+        <div class="tiles">
+          <div class="tile">
+            <div class="tile-label" id="lblOut">输出</div>
+            <div class="tile-value" id="valOut">—</div>
+          </div>
+          <div class="tile">
+            <div class="tile-label" id="lblIn">输入</div>
+            <div class="tile-value" id="valIn">—</div>
+          </div>
+          <div class="tile">
+            <div class="tile-label" id="lblReasoning">推理</div>
+            <div class="tile-value" id="valReasoning">—</div>
+          </div>
+          <div class="tile">
+            <div class="tile-label" id="lblCacheRead">缓存读取</div>
+            <div class="tile-value" id="valCacheRead">—</div>
+          </div>
+          <div class="tile">
+            <div class="tile-label" id="lblDuration">用时</div>
+            <div class="tile-value" id="valDuration">—</div>
+          </div>
+          <div class="tile">
+            <div class="tile-label" id="lblTotal">本次合计</div>
+            <div class="tile-value" id="valTotal">—</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 本会话累计 -->
+      <section class="card">
+        <div class="card-head">
+          <span class="card-title" id="sessionTitle">本会话累计</span>
+          <span class="card-note" id="sessionNote"></span>
+        </div>
+        <div class="rows">
+          <div class="row">
+            <span class="row-label" id="lblSessionTotal">总用量</span>
+            <span class="row-value" id="valSessionTotal">—</span>
+          </div>
+          <div class="row">
+            <span class="row-label" id="lblReplies">回复条数</span>
+            <span class="row-value" id="valReplies">—</span>
+          </div>
+          <div class="row">
+            <span class="row-label" id="lblAvg">平均速度</span>
+            <span class="row-value" id="valAvg">—</span>
+          </div>
+          <div class="row">
+            <span class="row-label" id="lblPeak">峰值速度</span>
+            <span class="row-value" id="valPeak">—</span>
+          </div>
+          <div class="row">
+            <span class="row-label" id="lblSessionDuration">累计用时</span>
+            <span class="row-value" id="valSessionDuration">—</span>
+          </div>
+          <div class="row">
+            <span class="row-label" id="lblCacheRate">缓存命中率</span>
+            <span class="row-value" id="valCacheRate">—</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 最近回复列表 -->
+      <section class="card">
+        <div class="card-head">
+          <span class="card-title" id="recentTitle">最近回复</span>
+          <span class="card-note" id="recentNote"></span>
+        </div>
+        <div class="list" id="recentList"></div>
+      </section>
+
+      <footer class="foot" id="foot"></footer>
+    </main>
+  </div>
+
+  <script src="panel.js"></script>
+</body>
+</html>

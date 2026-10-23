@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN" data-base="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; font-src 'self' file:; connect-src 'none'; form-action 'none'; base-uri 'none'"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--
+    停靠式工作面板视图。宿主把本页嵌入右侧工作面板，并把
+    --pi-plugin-titlebar-height 设为 0px（浮动 panel 才是 46px），
+    因此这里不需要为拖拽带或窗口控制胶囊预留空间。
+    数据全部经 pluginBridge.invoke 的 trajectory.* 通道按需拉取；
+    无内联脚本（CSP script-src 'self'）。
+  -->
+  <meta name="pi-plugin-chrome" content="v2" />
+  <title>轨迹回放</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div class="wrap" id="wrap">
+
+    <header class="head">
+      <button type="button" class="icon-button" id="toggleSessions" title="会话列表" aria-label="会话列表">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+      </button>
+      <span class="head-title" id="headTitle">轨迹回放</span>
+      <span class="dot" aria-hidden="true"></span>
+      <span class="head-status" id="headStatus"></span>
+      <span class="head-spacer"></span>
+      <button type="button" class="icon-button toggle" id="followBtn" title="跟随最新会话" aria-label="跟随最新会话">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-8 8" /><path d="M12 4v4" /><circle cx="12" cy="13" r="2.5" /></svg>
+      </button>
+      <button type="button" class="icon-button" id="refreshBtn" title="刷新" aria-label="刷新">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+          <path d="M21 3v5h-5" />
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+          <path d="M8 16H3v5" />
+        </svg>
+      </button>
+    </header>
+
+    <div class="body" id="bodyRow">
+
+      <aside class="sessions" id="sessionsPane">
+        <input id="searchInput" class="search" type="text" placeholder="搜索会话…" autocomplete="off" spellcheck="false" />
+        <div class="session-list" id="sessionList"></div>
+      </aside>
+
+      <main class="content">
+        <div class="state" id="stateBox" hidden>
+          <div class="state-title" id="stateTitle"></div>
+          <div class="state-body" id="stateBody"></div>
+        </div>
+
+        <section class="timeline" id="timelineBox" hidden>
+          <div class="session-line">
+            <span class="session-name" id="sessionName"></span>
+            <span class="session-badges" id="sessionBadges"></span>
+          </div>
+          <div class="strip-wrap" id="stripWrap">
+            <div class="strip" id="strip" role="listbox" aria-label="turn 时间线"></div>
+            <div class="playhead" id="playhead" hidden>
+              <div class="playhead-knob"></div>
+            </div>
+          </div>
+          <div class="strip-legend" id="stripLegend">
+            <span class="lg"><i class="sw tool"></i>tool</span>
+            <span class="lg"><i class="sw think"></i>thinking</span>
+            <span class="lg"><i class="sw cut"></i>compaction</span>
+            <span class="lg derived-note" id="derivedNote"></span>
+          </div>
+        </section>
+
+        <section class="inspector" id="inspector" hidden></section>
+      </main>
+    </div>
+
+    <footer class="foot" id="foot"></footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "id": "local.rea",
+  "name": "REA 逆向工程",
+  "version": "1.1.0",
+  "description": "把 REA（Reverse Engineer Anything）接入 PI-Desktop：声明它的本地 MCP 服务器后，REA 的 170 个逆向工程工具直接进入客户端的工具表，可用 ToolSearch 发现、可直接调用；右侧工作面板提供完整的工具目录（分组、搜索、参数、调用示例）与运行时连接状态，另注册 rea_tools 供 Agent 离线查询工具清单。",
+  "i18n": {
+    "en": {
+      "name": "REA Reverse Engineering",
+      "description": "Bring REA (Reverse Engineer Anything) into PI-Desktop: declaring its local MCP server puts REA's 170 reverse-engineering tools straight into the client's tool table for ToolSearch discovery and direct calls, while a work-panel view offers the full tool catalog (groups, search, parameters, call examples) with runtime connection state, plus a rea_tools agent tool for offline catalog lookups.",
+      "safetyNotes": "This plugin declares a local stdio MCP server (`node launcher.cjs`), which the host launches as a child process of the plugin: the launcher locates an installed copy of REA and starts its MCP entrypoint with Node, so REA runs with your user privileges. REA is not bundled in the package; install it with the plugin command \"REA: prepare runtime\", or with `npm install -g rea-agents@6.4.0`. That install command is the only time the plugin reaches the network, and it is user-triggered. The plugin itself writes nothing outside its own data directory, reads nothing but its bundled catalog, and the rea_tools agent tool never touches the filesystem or the network. Analysis is performed locally by REA on the targets you name — this plugin only routes tool calls to it. clipboard.write is used only by the \"REA: copy tool list\" command, which puts the 170 callable tool names on your clipboard when you run it; the plugin never reads the clipboard. Review REA's own permissions for what its tools may do to a target."
+    },
+    "zh-CN": {
+      "name": "REA 逆向工程",
+      "description": "把 REA（Reverse Engineer Anything）接入 PI-Desktop：声明它的本地 MCP 服务器后，REA 的 170 个逆向工程工具直接进入客户端的工具表，可用 ToolSearch 发现、可直接调用；右侧工作面板提供完整的工具目录（分组、搜索、参数、调用示例）与运行时连接状态，另注册 rea_tools 供 Agent 离线查询工具清单。",
+      "safetyNotes": "本插件声明了一个本地 stdio MCP 服务器（`node launcher.cjs`），由宿主作为插件子进程启动：启动器定位一份已安装的 REA，用 Node 直接拉起它的 MCP 入口，REA 因此以你的用户权限运行。REA 本体不打包在插件内，请用插件命令「REA：准备运行时」安装，或手动执行 `npm install -g rea-agents@6.4.0`——这条安装命令是插件唯一会联网的时刻，且由你主动触发。插件自身不向自己的数据目录以外写任何东西，除包内目录数据外不读取任何内容；rea_tools 工具也不碰文件系统、不联网。分析由 REA 在你指定的目标上本地完成，本插件只负责把工具调用转给它。clipboard.write 只被「REA：复制全部工具名到剪贴板」这条命令使用——你主动运行它时，170 个可调用工具名会写进剪贴板；插件从不读取剪贴板内容。REA 工具对目标能做什么，请另行查看 REA 自身的说明。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": [
+    "developer-tools",
+    "productivity"
+  ],
+  "changelog": "Release 1.1.0：修掉两条名不副实的命令——「打开工具箱面板」做不到（插件进程没有打开停靠视图的 API，改为不提供），「复制全部工具名」只弹提示不复制（现在真的写剪贴板，为此申请 clipboard.write）。新增「REA：检查运行时状态」：用与启动器同一份定位逻辑，如实报告找到哪份 REA、版本与来源。运行时定位逻辑抽到 runtime.js 由启动器与插件进程共用，避免两处漂移。",
+  "main": "main.js",
+  "contributes": {
+    "views": [
+      {
+        "id": "reaCatalog",
+        "title": {
+          "en": "REA Toolkit",
+          "zh-CN": "REA 工具箱"
+        },
+        "icon": "search",
+        "entry": "views/index.html",
+        "order": 55
+      }
+    ],
+    "commands": [
+      {
+        "id": "rea.status",
+        "title": "REA：检查运行时状态",
+        "keywords": [
+          "rea",
+          "status",
+          "runtime",
+          "doctor",
+          "状态",
+          "检查",
+          "诊断"
+        ],
+        "category": "Developer Tools"
+      },
+      {
+        "id": "rea.copyToolList",
+        "title": "REA：复制全部工具名到剪贴板",
+        "keywords": [
+          "rea",
+          "tools",
+          "copy",
+          "工具",
+          "复制",
+          "清单"
+        ],
+        "category": "Developer Tools"
+      },
+      {
+        "id": "rea.prepareRuntime",
+        "title": "REA：准备运行时（下载 rea-agents）",
+        "keywords": [
+          "rea",
+          "runtime",
+          "install",
+          "prepare",
+          "运行时",
+          "安装",
+          "下载"
+        ],
+        "category": "Developer Tools"
+      }
+    ],
+    "agentTools": [
+      {
+        "name": "rea_tools",
+        "description": "List or search REA's reverse-engineering tool catalog offline (170 tools: native binaries, JavaScript/Electron, .NET, Android, firmware, websites, network captures, evidence comparison). Pass a `query` to filter by name/description/group, or omit it to get every tool grouped by area. Each entry carries the tool's argument names, which are required, and the exact client tool name to call. Use this before reaching for a REA tool so you call the right one with the right arguments; it reads a catalog bundled in the plugin and never touches the network or the filesystem.",
+        "risk": "low",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Case-insensitive keywords matched against tool name, title, description and group label. Omit to list everything."
+            },
+            "group": {
+              "type": "string",
+              "description": "Restrict to one group id (for example native, javascript, android, evidence). Call with no query to see the group ids."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 170,
+              "description": "Maximum entries to return. Defaults to 40."
+            }
+          }
+        }
+      }
+    ],
+    "skills": [
+      "skills/rea-workflow.md"
+    ],
+    "mcpServers": [
+      {
+        "id": "rea",
+        "label": "REA",
+        "transport": "stdio",
+        "command": "node",
+        "args": [
+          "launcher.cjs"
+        ]
+      }
+    ]
+  },
+  "permissions": [
+    "ui.view",
+    "agent.tool.register",
+    "agent.prompt.inject",
+    "mcp.server.local",
+    "clipboard.write"
+  ],
+  "engines": {
+    "piDesktop": ">=0.15.0"
+  },
+  "activationEvents": [
+    "onStartup"
+  ]
+}

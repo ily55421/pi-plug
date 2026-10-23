@@ -1,0 +1,118 @@
+/*
+ * Token 计量 —— 速度浮窗样式。
+ *
+ * 关键约束：窗口本身是透明的（宿主给 backgroundColor = "#00000000"），
+ * 所以 body/html 必须完全透明，只有 .hud 这一块绘制背景，其余区域点得穿。
+ *
+ * 不做任何交互：宿主把整窗设成 drag-region，任何可点元素都会和拖动抢事件，
+ * 而浮窗没有控制胶囊，用户右键即可拿到宿主的关闭菜单。
+ */
+
+:root {
+  --hud-bg: rgba(24, 25, 27, 0.86);
+  --hud-border: rgba(255, 255, 255, 0.14);
+  --fg: #f2f3f4;
+  --fg-muted: #a6abb2;
+  --fg-faint: #7c828a;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+html[data-base="light"] {
+  --hud-bg: rgba(255, 255, 255, 0.9);
+  --hud-border: rgba(0, 0, 0, 0.14);
+  --fg: #17191c;
+  --fg-muted: #5d636b;
+  --fg-faint: #878d96;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* 透明窗口：页面底必须透明，否则会盖住底下的聊天界面。 */
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  color: var(--fg);
+  /* 整块交给宿主的拖动区域处理，浮窗不消费任何指针事件。 */
+  pointer-events: none;
+  user-select: none;
+  cursor: default;
+}
+
+.hud {
+  /* 撑满窗口，让可拖动区域和可见区域一致。 */
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--hud-border);
+  border-radius: 10px;
+  background: var(--hud-bg);
+  /* 半透明浮窗上给一点阴影，避免和深色聊天背景糊在一起。 */
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(6px);
+  overflow: hidden;
+}
+
+.row-speed {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  line-height: 1.05;
+}
+
+.approx {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--fg-muted);
+}
+
+.value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.unit {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+
+.row-detail {
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row-total {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row-total:empty {
+  display: none;
+}

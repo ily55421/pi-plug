@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "local.a11y-audit",
+  "name": "可访问性审计",
+  "version": "0.1.0",
+  "description": "审计工作区浏览器面板里当前页面的可访问性：无名称的交互元素、缺 alt 的图片、只有占位词的名称、整页没有标题或没有交互角色。只读，并明确列出因能力边界而无法检查的项（对比度、焦点顺序、ARIA 状态）。",
+  "i18n": {
+    "en": {
+      "name": "A11y Audit",
+      "description": "Audits the page open in the workspace browser panel for accessibility problems: interactive elements with no accessible name, images without alt text, placeholder-only names, and pages with no headings or no interactive roles. Read-only, and it states explicitly which checks it cannot perform (contrast, focus order, ARIA state).",
+      "safetyNotes": "Declares browser.cdp and agent.tool.register. browser.cdp controls the host work-panel guest and is clamped to this plugin's own view; this plugin only reads the accessibility tree through pi.browser.snapshot(), never navigates, never injects script, never screenshots and never writes files. The audit is a pure function over the flattened tree the host already produced, so nothing is sent anywhere. It reports what it cannot check instead of implying full WCAG coverage."
+    },
+    "zh-CN": {
+      "name": "可访问性审计",
+      "description": "审计工作区浏览器面板里当前页面的可访问性：无名称的交互元素、缺 alt 的图片、只有占位词的名称、整页没有标题或没有交互角色。只读，并明确列出因能力边界而无法检查的项（对比度、焦点顺序、ARIA 状态）。",
+      "safetyNotes": "声明 browser.cdp 与 agent.tool.register。browser.cdp 控制宿主工作面板的 guest，且被夹取到本插件自己的视图；本插件只通过 pi.browser.snapshot() 读取可访问性树，不导航、不注入脚本、不截图、不写文件。审计是对宿主已产出的扁平树做的纯函数计算，不向任何地方发送数据。它如实报告做不到的检查项，而不是暗示覆盖了完整 WCAG。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": ["developer-tools", "accessibility"],
+  "main": "main.js",
+  "contributes": {
+    "agentTools": [
+      {
+        "name": "a11y_audit",
+        "description": "Audit the page open in the workspace browser panel for accessibility problems the flattened tree can reveal.",
+        "risk": "low"
+      }
+    ],
+    "commands": [
+      {
+        "id": "a11yAudit.open",
+        "title": "可访问性审计：检查当前页面",
+        "keywords": ["a11y", "accessibility", "无障碍", "可访问性", "audit", "审计"],
+        "category": "Developer"
+      }
+    ]
+  },
+  "permissions": ["browser.cdp", "agent.tool.register"],
+  "engines": {
+    "piDesktop": ">=0.15.1-beta.7"
+  },
+  "activationEvents": ["onStartup"]
+}

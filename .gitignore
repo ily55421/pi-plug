@@ -1,0 +1,11 @@
+# 嵌套的参考仓库（克隆的 PI-Desktop 插件示例源码，独立版本控制）
+/pi-desktop-plugins/
+
+# 临时目录与日志
+Temp/
+*.log
+*.tmp
+
+# 编辑器
+.vscode/
+.idea/

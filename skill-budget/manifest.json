@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "local.skill-budget",
+  "name": "技能广告预算",
+  "version": "0.2.0",
+  "description": "审计系统提示里「技能广告」的成本：技能条数、估算 token 占比、最占位的条目，以及被重复广告（同 id）或近重复（不同 id、描述雷同）的技能。只读；可选按 id 去重，默认关闭。判定在 agent sidecar 内完成，只申请 agent.extension，不读文件、不联网、不起进程。",
+  "i18n": {
+    "en": {
+      "name": "Skill Budget",
+      "description": "Audits what the skill catalog costs inside the system prompt: how many skills are advertised, their estimated token share, the heaviest entries, and skills advertised twice (same id) or near-duplicated under different ids. Read-only, with optional same-id de-duplication that is off by default. Runs in the agent sidecar and declares only agent.extension: no file access, no network, no child processes.",
+      "safetyNotes": "Declares exactly one permission: agent.extension, which is the capability that lets it read the system prompt at all. It never writes files, never touches the network, clipboard or credentials, never spawns processes and never calls a model. By default it only reports; rewriting the skill section requires an explicit dedupeSkillsSection setting and only ever removes an exact same-id duplicate, keeping the first occurrence. Token counts are labelled estimates because no tokenizer is exposed to plugins."
+    },
+    "zh-CN": {
+      "name": "技能广告预算",
+      "description": "审计系统提示里「技能广告」的成本：技能条数、估算 token 占比、最占位的条目，以及被重复广告（同 id）或近重复（不同 id、描述雷同）的技能。只读；可选按 id 去重，默认关闭。判定在 agent sidecar 内完成，只申请 agent.extension，不读文件、不联网、不起进程。",
+      "safetyNotes": "只声明一项权限：agent.extension，这本身就是它读取系统提示所需的能力。它不写文件、不碰网络/剪贴板/凭据、不起子进程、不调用任何模型。默认只报告；改写技能段需要显式开启 dedupeSkillsSection，且只删除「同一个 id 被广告两次」这种完全重复，保留第一次出现的那条。token 数是估算并已标注，因为宿主没有把分词器暴露给插件。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": [
+    "developer-tools",
+    "productivity"
+  ],
+  "main": "main.js",
+  "contributes": {
+    "agentExtensions": [
+      "extension/index.mjs"
+    ],
+    "settings": [
+      {
+        "key": "dedupeSkillsSection",
+        "title": "按 id 去重技能清单",
+        "description": "开启后会把重复广告（同 id）的技能从系统提示里合并成一条。默认只审计不改写。",
+        "type": "boolean",
+        "default": false,
+        "scope": "plugin"
+      }
+    ]
+  },
+  "permissions": [
+    "agent.extension"
+  ],
+  "engines": {
+    "piDesktop": ">=0.15.1-beta.7"
+  },
+  "activationEvents": [
+    "onStartup"
+  ]
+}

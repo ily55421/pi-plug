@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "local.format-on-edit",
+  "name": "编辑后格式化",
+  "version": "0.2.0",
+  "description": "Edit / Write 成功后按扩展名跑 formatter，并把格式化后的新文件 tag 回传给模型，避免下一次编辑因 tag 失效而报错。默认关闭；只有项目确实声明了对应依赖时才动手，任何一步失败都退回原结果。判定在 agent sidecar 内完成，只申请 agent.extension。",
+  "i18n": {
+    "en": {
+      "name": "Format on Edit",
+      "description": "After a successful Edit or Write, runs the formatter for that extension and hands the new file tag back to the model so the next edit does not fail on a stale tag. Off by default; acts only when the project really declares the formatter, and always falls back to the original tool result if anything goes wrong. Runs in the agent sidecar and declares only agent.extension.",
+      "safetyNotes": "Declares exactly one permission: agent.extension, whose exec runs in the sidecar with the session working directory, so no filesystem or process permission is requested. It is off unless formatOnEdit is explicitly true. It never touches generated or dependency directories, never formats a file larger than 2 MiB, never runs a formatter the project does not declare, and aborts after 8 seconds. On any failure the original tool result is kept and a note explains that formatting was skipped, so a successful edit is never turned into a failure."
+    },
+    "zh-CN": {
+      "name": "编辑后格式化",
+      "description": "Edit / Write 成功后按扩展名跑 formatter，并把格式化后的新文件 tag 回传给模型，避免下一次编辑因 tag 失效而报错。默认关闭；只有项目确实声明了对应依赖时才动手，任何一步失败都退回原结果。判定在 agent sidecar 内完成，只申请 agent.extension。",
+      "safetyNotes": "只声明一项权限：agent.extension，它的 exec 在 sidecar 内以会话工作目录运行，因此不申请任何文件系统或进程权限。未显式设置 formatOnEdit 为 true 时完全不动作。它不碰生成物与依赖目录、不格式化超过 2 MiB 的文件、不运行项目未声明的 formatter、8 秒超时即放弃。任何一步失败都保留原工具结果并注明「未格式化」，绝不把一次成功的编辑变成失败。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": [
+    "developer-tools",
+    "productivity"
+  ],
+  "main": "main.js",
+  "contributes": {
+    "agentExtensions": [
+      "extension/index.mjs"
+    ],
+    "settings": [
+      {
+        "key": "formatOnEdit",
+        "title": "编辑后自动格式化",
+        "description": "Edit / Write 成功后跑 formatter，并把新文件 tag 回传给模型。关闭时完全不动作。",
+        "type": "boolean",
+        "default": false,
+        "scope": "plugin"
+      }
+    ]
+  },
+  "permissions": [
+    "agent.extension"
+  ],
+  "engines": {
+    "piDesktop": ">=0.15.1-beta.7"
+  },
+  "activationEvents": [
+    "onStartup"
+  ]
+}

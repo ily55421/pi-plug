@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "id": "local.loop-brake",
+  "name": "重复调用闸",
+  "version": "0.2.0",
+  "description": "在 agent 循环里实时拦截重复工具调用：同一工具以同一组入参连续重复达到阈值后先警告、再阻断，并把原因交给模型，让它换策略而不是原样重试。判定完全在 agent sidecar 内完成，只申请 agent.extension 一项权限，不读文件、不联网、不起进程。",
+  "i18n": {
+    "en": {
+      "name": "Loop Brake",
+      "description": "Stops repeated tool calls inside the agent loop: when the same tool runs with the same arguments consecutively up to a threshold, the extension warns first and then blocks, handing the reason back to the model so it changes strategy instead of retrying the identical call. All logic runs in the agent sidecar; it declares only agent.extension and never reads files, uses the network or spawns processes.",
+      "safetyNotes": "This plugin declares exactly one permission: agent.extension. That grants code execution inside the agent sidecar, which is why no other capability is needed or requested. It does not read or write files, does not touch the network, clipboard or credentials, does not spawn processes, and does not call any model. Its only state is in-memory per-session call fingerprints, discarded on session shutdown. Parameters are never logged; block and warning messages contain only a short structural summary (key names and clipped values) so the model can tell which call repeated."
+    },
+    "zh-CN": {
+      "name": "重复调用闸",
+      "description": "在 agent 循环里实时拦截重复工具调用：同一工具以同一组入参连续重复达到阈值后先警告、再阻断，并把原因交给模型，让它换策略而不是原样重试。判定完全在 agent sidecar 内完成，只申请 agent.extension 一项权限，不读文件、不联网、不起进程。",
+      "safetyNotes": "本插件只声明一项权限：agent.extension。该权限本身即在 agent sidecar 内执行代码的能力，因此不需要也不申请其他任何能力。它不读写文件、不触碰网络/剪贴板/凭据、不起子进程、不调用任何模型。唯一的状态是内存里的按会话调用指纹，会话结束即丢弃。入参从不写日志；警告与阻断文案只含简短的结构摘要（键名与截断后的值），以便模型判断是哪次调用重复了。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": [
+    "developer-tools",
+    "safety"
+  ],
+  "main": "main.js",
+  "contributes": {
+    "agentExtensions": [
+      "extension/index.mjs"
+    ],
+    "settings": [
+      {
+        "key": "enabled",
+        "title": "启用重复调用闸",
+        "description": "同一工具以同一组入参连续重复达到阈值时先警告、再阻断。关掉后完全不干预。",
+        "type": "boolean",
+        "default": true,
+        "scope": "plugin"
+      },
+      {
+        "key": "threshold",
+        "title": "重复阈值",
+        "description": "连续重复多少次算死循环（2-20）。第 N 次警告，第 N+1 次阻断。",
+        "type": "number",
+        "default": 3,
+        "scope": "plugin"
+      },
+      {
+        "key": "mode",
+        "title": "模式",
+        "description": "warn：第一次撞线只警告；block：撞线即阻断。",
+        "type": "select",
+        "default": "warn",
+        "enum": [
+          {
+            "label": "先警告后阻断",
+            "value": "warn"
+          },
+          {
+            "label": "直接阻断",
+            "value": "block"
+          }
+        ],
+        "scope": "plugin"
+      },
+      {
+        "key": "ignoreTools",
+        "title": "豁免工具",
+        "description": "这些工具永不止损，逗号分隔（例如允许轮询的工具名）。",
+        "type": "string",
+        "default": "",
+        "scope": "plugin"
+      }
+    ]
+  },
+  "permissions": [
+    "agent.extension"
+  ],
+  "engines": {
+    "piDesktop": ">=0.15.1-beta.7"
+  },
+  "activationEvents": [
+    "onStartup"
+  ]
+}

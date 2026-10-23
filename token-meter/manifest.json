@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "id": "local.token-meter",
+  "name": "Token 计量",
+  "version": "0.4.1",
+  "description": "记录每次模型回复的 token 消耗与生成速度（tokens/s）：一个可拖到任意固定位置的透明置顶速度浮窗，外加右侧工作面板里的完整仪表盘——年/月/日三级累计看板、按模型分列的消耗与速度、平均/峰值速度、累计用时、缓存命中率。只读本地记录，不联网。",
+  "i18n": {
+    "en": {
+      "name": "Token Meter",
+      "description": "Records the token cost and generation speed (tokens/s) of every model reply: a transparent always-on-top speed HUD you can drag to any fixed spot, plus a full dashboard in the right work panel — a year/month/day cumulative board, per-model consumption and speed, average/peak speed, accumulated time and cache hit rate. Reads local records only; no network.",
+      "safetyNotes": "Reads local metadata only and is always read-only towards the host. The plugin process reads the session transcripts and the pi.sqlite turns table under ~/.pi-desktop with Node's own fs (the host permission gateway does not mediate raw Node calls), so this plugin declares no fs.read or session.read permission and never touches message text, tool arguments, project paths or credentials. The snapshot and the cumulative board it publishes contain only a truncated 8-character session id, model id, token counters, durations and timestamps. For the cumulative board it writes one aggregation cache (history-cache.json) inside its own plugin data directory, keyed by file fingerprints, so a rescan is not needed on every poll; nothing is written to the host directory or anywhere else. The floating HUD is a host-owned transparent window; the plugin can neither position it nor move it on its own — only the user drags it, and the host's own right-click menu closes it. It makes no network request."
+    },
+    "zh-CN": {
+      "name": "Token 计量",
+      "description": "记录每次模型回复的 token 消耗与生成速度（tokens/s）：一个可拖到任意固定位置的透明置顶速度浮窗，外加右侧工作面板里的完整仪表盘——年/月/日三级累计看板、按模型分列的消耗与速度、平均/峰值速度、累计用时、缓存命中率。只读本地记录，不联网。",
+      "safetyNotes": "只读取本地元数据，对宿主始终只读。插件进程用 Node 自身的 fs 读取 ~/.pi-desktop 下的会话转录本与 pi.sqlite 的 turns 表（宿主的权限网关不介入原生 Node 调用），因此本插件不声明 fs.read / session.read，也从不读取消息正文、工具参数、项目路径或凭据。发布的快照与累计看板里只有截断到 8 位的会话 id、模型 id、token 计数、时长与时间戳。累计看板会在**插件自己的数据目录**内写一份聚合缓存（history-cache.json），按文件指纹缓存，避免每次轮询都重扫；宿主目录及其他任何位置都不写入。速度浮窗是宿主提供的透明窗口，插件既不能设置它的坐标也不能自行移动它——只有用户可以拖动，关闭也走宿主自带的右键菜单。不发起任何网络请求。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": ["productivity", "developer-tools"],
+  "main": "main.js",
+  "ui": {
+    "panel": "views/widget.html",
+    "shape": "widget",
+    "title": {
+      "en": "Token Meter",
+      "zh-CN": "Token 计量"
+    },
+    "width": 232,
+    "height": 120,
+    "alwaysOnTop": true,
+    "resizable": false
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "tokenMeter",
+        "title": {
+          "en": "Token Meter",
+          "zh-CN": "Token 计量"
+        },
+        "entry": "views/index.html",
+        "order": 45
+      }
+    ],
+    "commands": [
+      {
+        "id": "tokenMeter.openWidget",
+        "title": "Token 计量：显示/隐藏速度浮窗",
+        "keywords": ["token", "tokens", "speed", "tps", "hud", "浮窗", "速度", "计量"],
+        "category": "Productivity"
+      },
+      {
+        "id": "tokenMeter.summary",
+        "title": "Token 计量：查看本次生成速度",
+        "keywords": ["token", "tokens", "speed", "tps", "usage", "用量", "速度", "计量"],
+        "category": "Productivity"
+      }
+    ]
+  },
+  "permissions": ["ui.view", "ui.panel"],
+  "engines": {
+    "piDesktop": ">=0.9.0"
+  },
+  "activationEvents": ["onStartup"]
+}
