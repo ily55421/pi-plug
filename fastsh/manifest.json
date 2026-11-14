@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "local.fastsh",
+  "name": "快速 Shell",
+  "version": "0.2.0",
+  "description": "给 Agent 的 POSIX 快速通道：内嵌 mvdan.cc/sh v3 的常驻守护进程，用 Go 原生实现了 29 个 Windows 上缺失的核心工具（ls/cat/cp/mv/rm/mkdir/touch/wc/head/tail/grep/sed/sort/uniq/find/stat/env/dirname/basename/tr/sleep/date/seq 等）。轻量命令的端到端开销从 PowerShell 7 的约 400ms 降到数十毫秒。对 PowerShell 专有语法（$env:、cmdlet、.ps1、反斜杠路径）和解析失败、命令缺失、工作目录无效的情况会明确返回 fallback，让模型立刻回退到内置 Bash 工具，保证语义不回退。单次输出上限 8MB，超出截断而不是卡死；默认工作目录与 Bash 一致（工作区根）。守护进程随插件启动、随插件退出，崩溃自动重启；不联网、不读项目文件、不碰凭据。",
+  "i18n": {
+    "en": {
+      "name": "Fast Shell",
+      "description": "A POSIX fast lane for the agent: a resident daemon embedding mvdan.cc/sh v3, with 29 coreutils implemented natively in Go for the ones Windows lacks (ls/cat/cp/mv/rm/mkdir/touch/wc/head/tail/grep/sed/sort/uniq/find/stat/env/dirname/basename/tr/sleep/date/seq and more). Lightweight commands cost about 1ms instead of the ~270ms a PowerShell 7 cold start takes. PowerShell-only syntax ($env:, cmdlets, .ps1, backslash paths), parse failures and missing commands return an explicit fallback so the model switches back to the built-in Bash tool and semantics never regress. The daemon starts with the plugin, stops with it, and restarts on crash. No network, no project file reads, no credentials.",
+      "safetyNotes": "The plugin spawns only its own bundled binary (bin/fastsh.exe) and speaks a line-delimited JSON protocol over stdio. It never touches project files, the network, the clipboard or credentials. The registered tool takes a POSIX command string, an optional working directory and an optional timeout; the daemon runs the command in-process through the embedded shell interpreter with a hard timeout and an 8MB output cap. Commands that use PowerShell-only syntax, fail to parse as POSIX, or name a command unavailable in the POSIX environment are refused with fallback=true instead of being executed."
+    },
+    "zh-CN": {
+      "name": "快速 Shell",
+      "description": "给 Agent 的 POSIX 快速通道：内嵌 mvdan.cc/sh v3 的常驻守护进程，用 Go 原生实现了 29 个 Windows 上缺失的核心工具（ls/cat/cp/mv/rm/mkdir/touch/wc/head/tail/grep/sed/sort/uniq/find/stat/env/dirname/basename/tr/sleep/date/seq 等）。轻量命令的单次开销从 PowerShell 7 的约 270ms 降到约 1ms。对 PowerShell 专有语法（$env:、cmdlet、.ps1、反斜杠路径）和解析失败、命令缺失的情况会明确返回 fallback，让模型立刻回退到内置 Bash 工具，保证语义不回退。守护进程随插件启动、随插件退出，崩溃自动重启；不联网、不读项目文件、不碰凭据。",
+      "safetyNotes": "插件只启动自带的 bin/fastsh.exe，通过 stdio 上的逐行 JSON 协议通信，不读取项目文件、不联网、不碰剪贴板与凭据。注册的工具接收一条 POSIX 命令、可选工作目录和可选超时；守护进程用内嵌的 shell 解释器在进程内执行该命令，带硬超时与 8MB 输出上限。凡是使用了 PowerShell 专有语法、无法按 POSIX 解析、或命令在 POSIX 环境下不可用的，一律以 fallback=true 拒绝执行而不是硬跑。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": ["developer-tools", "productivity"],
+  "main": "main.js",
+  "contributes": {
+    "agentTools": [
+      {
+        "name": "fastsh_run",
+        "description": "Run a POSIX shell command through the embedded fast interpreter (mvdan.cc/sh v3) in a resident daemon. Use this instead of the Bash tool for lightweight commands: it costs tens of milliseconds end-to-end instead of the ~400ms a PowerShell cold start takes, and it ships 29 native coreutils (ls/cat/cp/mv/rm/mkdir/touch/wc/head/tail/grep/sed/sort/uniq/find/stat/env/dirname/basename/tr/sleep/date/seq). Write native POSIX syntax with forward-slash paths. Output up to 8MB is returned safely (larger output is truncated with a note, never hangs). It runs in the current workspace root by default, same as the Bash tool. If the result has fallback=true, do NOT retry here: call the Bash tool instead, because this command was refused as needing PowerShell semantics (reasons: pwsh_env_var, pwsh_cmdlet, pwsh_param, pwsh_operator, pwsh_script, pwsh_array, pwsh_block, win_backslash_path, win_relative_path, posix_parse_error, command_not_found, cwd_not_found, daemon_unavailable). Prefer this tool for read-only inspection (ls, cat, grep, find, wc, head, tail, stat, pwd) and simple pipelines; use the Bash tool for anything touching PowerShell, cmdlets, .ps1 scripts, Windows backslash paths, or long-running builds.",
+        "risk": "medium",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "The POSIX command to run, e.g. 'ls -la' or 'cat package.json | head -20'. Use forward-slash paths and POSIX syntax."
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Optional working directory. Defaults to the current workspace root."
+            },
+            "timeoutMs": {
+              "type": "number",
+              "description": "Optional timeout in milliseconds (1-600000). Defaults to 60000."
+            }
+          },
+          "required": ["command"]
+        }
+      }
+    ],
+    "skills": ["skills/fastsh-commands.md"]
+  },
+  "permissions": ["agent.tool.register", "agent.prompt.inject"],
+  "engines": {
+    "piDesktop": ">=0.15.1-beta.7"
+  },
+  "activationEvents": ["onStartup"]
+}
