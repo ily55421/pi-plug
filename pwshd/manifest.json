@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "local.pwshd",
+  "name": "常驻 PowerShell",
+  "version": "0.1.0",
+  "description": "给 Agent 的 PowerShell 快速通道：常驻一个 pwsh 进程，每条命令在独立 Runspace 中执行，省掉每次约 250ms 的 pwsh 冷启动，轻量命令单次耗时从约 440ms 降到约 60ms。语义与内置 Bash 对齐：同样接受 PowerShell 语法、同样的工作目录（工作区根）、退出码按 $? 判定。状态隔离，变量与函数不跨命令残留。任何 daemon 故障都会返回 fallback 让模型改回内置 Bash；不联网、不读项目文件、不碰凭据。",
+  "i18n": {
+    "en": {
+      "name": "Resident PowerShell",
+      "description": "A PowerShell fast lane for the agent: one resident pwsh process, with each command executed in its own Runspace, removing the ~250ms pwsh cold start so short commands drop from about 440ms to about 60ms. Semantics match the built-in Bash tool: same PowerShell syntax, same working directory (the workspace root), and $?-based exit codes. State is isolated, so variables and functions never leak between commands. Any daemon failure returns fallback so the model switches back to the built-in Bash tool. No network, no project file reads, no credentials.",
+      "safetyNotes": "The plugin spawns only its own bundled server.ps1 through the local pwsh executable, and speaks a line-delimited base64+JSON protocol over stdio. Each command runs in a fresh Runspace, so no state carries over between commands. The registered tool takes a PowerShell command string, an optional working directory and an optional timeout; output is capped at 8MB and truncated with a note rather than hanging. The daemon is a child process of the app with no pipe or port reachable from outside."
+    },
+    "zh-CN": {
+      "name": "常驻 PowerShell",
+      "description": "给 Agent 的 PowerShell 快速通道：常驻一个 pwsh 进程，每条命令在独立 Runspace 中执行，省掉每次约 250ms 的 pwsh 冷启动，轻量命令单次耗时从约 440ms 降到约 60ms。语义与内置 Bash 对齐：同样接受 PowerShell 语法、同样的工作目录（工作区根）、退出码按 $? 判定。状态隔离，变量与函数不跨命令残留。任何 daemon 故障都会返回 fallback 让模型改回内置 Bash；不联网、不读项目文件、不碰凭据。",
+      "safetyNotes": "插件只通过本机 pwsh 执行自带的 server.ps1，通过 stdio 上的 base64+JSON 逐行协议通信。每条命令在全新 Runspace 中执行，命令之间不残留任何状态。注册的工具接收一条 PowerShell 命令、可选工作目录与可选超时；输出上限 8MB，超出会截断并标注而不是卡死。daemon 是 app 的子进程，外部没有管道或端口可连。"
+    }
+  },
+  "author": "local",
+  "license": "MIT",
+  "categories": ["developer-tools", "productivity"],
+  "main": "main.js",
+  "contributes": {
+    "agentTools": [
+      {
+        "name": "pwsh_run",
+        "description": "Run a PowerShell command in a resident daemon instead of spawning pwsh each time. This is the fast lane for PowerShell: it costs about 60ms instead of the ~440ms a fresh `pwsh -NoProfile -NonInteractive -Command` start takes, so it is roughly 7-10x faster for short commands. It is a drop-in replacement for the Bash tool on this Windows host: same PowerShell syntax, same exit-code semantics ($? based, matching `pwsh -Command`), same working directory (the workspace root). Each command runs in a fresh Runspace, so variables/functions do NOT leak between calls. Use it for Get-ChildItem, Select-Object, Where-Object, ForEach-Object, Get-Content, Test-Path, Get-Item, $env: reads, and ordinary native commands (git/node/cmd). Use the Bash tool instead for commands whose exit code must be exactly propagated (this tool maps `exit N` to 1), long builds and test suites, and anything interactive. If the result has fallback=true, do NOT retry here: call the Bash tool instead.",
+        "risk": "medium",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "The PowerShell command to run, e.g. 'Get-ChildItem -File | Select-Object -First 5'. Same syntax as the Bash tool."
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Optional working directory. Defaults to the current workspace root."
+            },
+            "timeoutMs": {
+              "type": "number",
+              "description": "Optional timeout in milliseconds (1000-600000). Defaults to 60000."
+            }
+          },
+          "required": ["command"]
+        }
+      }
+    ],
+    "skills": ["skills/pwshd-commands.md"]
+  },
+  "permissions": ["agent.tool.register", "agent.prompt.inject"],
+  "engines": {
+    "piDesktop": ">=0.15.1-beta.7"
+  },
+  "activationEvents": ["onStartup"]
+}
