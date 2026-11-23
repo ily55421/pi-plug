@@ -77,7 +77,7 @@ function norm(s) {
   console.log("== 0. 工具注册 ==");
   check("name", registered.name === "fastsh_run", registered.name);
   check("risk", registered.risk === "medium", registered.risk);
-  check("required 含 command", (registered.schema.required || []).includes("command"));
+  check("schema 含 command 与 commands", !!registered.schema.properties.command && !!registered.schema.properties.commands);
   console.log("  daemon: " + plugin.__test.DAEMON_PATH);
   console.log("");
 
@@ -163,8 +163,24 @@ function norm(s) {
   const dt = Date.now() - t0;
   check(`${N} 次调用平均 < 10ms`, dt / N < 10, `${dt}ms 总计，平均 ${(dt / N).toFixed(2)}ms/次`);
 
+  /* -------------------------------------------------------------- 批量 */
+  console.log("\n== 6. 批量 commands[] ==");
+  const batch = await registered.execute({ commands: ["echo a", "echo b", "echo c"] });
+  check("批量返回 batch 形状", batch.batch === true && batch.count === 3 && Array.isArray(batch.results), `count=${batch.count}`);
+  check(
+    "批量顺序与内容",
+    batch.ok === true && batch.results.map((r) => norm(r.stdout)).join(",") === "a,b,c",
+    JSON.stringify(batch.results.map((r) => norm(r.stdout)))
+  );
+  const mixed = await registered.execute({ commands: ["echo ok", "definitelynotacommand123"] });
+  check("批量含回退项 ok=false", mixed.ok === false && mixed.results[1].fallback === true, `okCount=${mixed.okCount}`);
+  const tooMany = await registered.execute({ commands: Array.from({ length: 21 }, (_, i) => `echo ${i}`) });
+  check("批量超限回退", tooMany.fallback === true && tooMany.fallbackReason === "batch_too_large", tooMany.fallbackReason);
+  const emptyBatch = await registered.execute({ commands: ["  "] });
+  check("批量全空回退", emptyBatch.fallback === true && emptyBatch.fallbackReason === "empty_command", emptyBatch.fallbackReason);
+
   /* ------------------------------------------------------ 崩溃自恢复 */
-  console.log("\n== 6. 崩溃自恢复 ==");
+  console.log("\n== 7. 崩溃自恢复 ==");
   const pid = plugin.__test.daemonPid();
   check("能拿到 daemon pid", typeof pid === "number" && pid > 0, String(pid));
   try {
@@ -181,7 +197,7 @@ function norm(s) {
   );
 
   /* -------------------------------------------------------------- 卸载 */
-  console.log("\n== 7. 卸载 ==");
+  console.log("\n== 8. 卸载 ==");
   const pidBefore = plugin.__test.daemonPid();
   await plugin.onUnload();
   await new Promise((r) => setTimeout(r, 300));

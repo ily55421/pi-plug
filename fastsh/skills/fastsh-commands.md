@@ -1,6 +1,6 @@
 ---
 name: fastsh-commands
-description: 需要执行轻量只读 POSIX 命令（ls/cat/grep/find/wc/head/tail/stat/pwd）或简单管道时使用，走 fastsh 快速通道而不是 Bash，单次开销从约 400ms 降到数十毫秒。涉及 PowerShell、cmdlet、.ps1、反斜杠路径、长构建时不要用。
+description: 需要执行轻量只读 POSIX 命令（ls/cat/grep/find/wc/head/tail/stat/pwd）或简单管道时使用，走 fastsh 快速通道而不是 Bash，单次开销从约 400ms 降到数十毫秒。多条独立检查用 commands 数组合并成一次调用省轮次。涉及 PowerShell、cmdlet、.ps1、反斜杠路径、长构建时不要用。
 ---
 
 # 轻量命令走 fastsh 快速通道
@@ -30,6 +30,14 @@ Bash 那 400ms 里绝大部分是 PowerShell 进程冷启动，与命令本身�
 - 需要限制输出的命令：daemon 有 8MB 输出上限，超了会截断并标注，不会卡死
 
 写法与真实 shell 一致，用正斜杠路径。
+
+## 批量（省轮次）
+
+多条独立检查合并成一次调用：传 `commands` 数组（≤20 条），顺序执行，结果在 `results[]` 按序返回。
+例如 `{ "commands": ["ls -la", "wc -l src/main.go", "cat package.json | head -5"] }`。
+N 条只付 1 次宿主开销 + 1 个轮次，比逐条调用省 (N−1) 次往返。需要看多条信息时优先批量。
+批量**不短路**：一条失败其余仍执行（顶层 `ok=false`，逐条看 `results[].ok` / `okCount`）；需要"前一条成功才跑后一条"时逐条发。
+文件依赖（前一条建、后一条读）放批量里是安全的——顺序有保证，这正是批量相对并发单调用的优势。
 
 ## 什么时候不要用它
 

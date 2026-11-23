@@ -21,6 +21,7 @@ const DEFAULT_TIMEOUT_MS = 60000;
 const MAX_TIMEOUT_MS = 600000;
 const MIN_TIMEOUT_MS = 1000;
 const START_TIMEOUT_MS = 10000;
+const MAX_BATCH = 20;
 
 let proc = null;
 let starting = null;
@@ -183,12 +184,18 @@ function normalizeTimeout(value) {
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_TIMEOUT_MS;
   return Math.min(Math.max(Math.round(n), MIN_TIMEOUT_MS), MAX_TIMEOUT_MS);
 }
+/** 自计时统一保留 2 位小数，便于直接比较。 */
+const round2 = (v) => Math.round(v * 100) / 100;
 
-function formatResult(r, command) {
+function formatResult(r, command, timings) {
   const base = {
     command,
     ok: r.ok === true,
     exitCode: typeof r.exitCode === "number" ? r.exitCode : null,
+    // 自计时口径：pluginMs=execute 全流程；cwdMs=resolveCwd 耗时；daemonMs=daemon 内 handle 耗时。
+    // 宿主级计时受并发归因污染，这组字段不依赖宿主日志，可直接做 IPC 分解：
+    // pluginMs − daemonMs ≈ IPC + cwd 解析 + 序列化等插件侧开销。
+    timings: timings || null,
     durationMs: typeof r.durationMs === "number" ? r.durationMs : null,
     stdout: typeof r.stdout === "string" ? r.stdout : "",
     stderr: typeof r.stderr === "string" ? r.stderr : "",
@@ -218,28 +225,20 @@ function isTransportError(err) {
   return /EPIPE|ECONNRESET|ERR_STREAM_DESTROYED|守护进程退出|启动超时/.test(m);
 }
 
-async function executeFastsh(args) {
-  const command =
-    typeof args && typeof args.command === "string" ? args.command.trim() : "";
-  if (!command) {
-    return {
-      ok: false,
-      fallback: true,
-      fallbackReason: "empty_command",
-      message: "缺少 command 参数。请改用内置 Bash 工具。",
-    };
-  }
-
-  const cwd = await resolveCwd(args && args.cwd);
-  const timeoutMs = normalizeTimeout(args && args.timeoutMs);
-
+/** 执行单条命令（含传输故障重试）。timings 以本条命令起点计，批量时各条独立。 */
+async function runOne(command, cwd, timeoutMs, cwdMs) {
+  const t0 = performance.now();
   // 传输层故障（daemon 被杀、管道断开）时清理并重试一次，
   // startDaemon 会自动把 daemon 拉起来；其余错误直接回退给内置 Bash。
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       await startDaemon();
       const r = await send({ command, cwd, timeoutMs }, timeoutMs);
-      return formatResult(r, command);
+      return formatResult(r, command, {
+        pluginMs: round2(performance.now() - t0),
+        cwdMs,
+        daemonMs: typeof r.durationMs === "number" ? r.durationMs : null,
+      });
     } catch (err) {
       if (attempt === 0 && isTransportError(err)) {
         proc = null;
@@ -250,6 +249,11 @@ async function executeFastsh(args) {
       return {
         command,
         ok: false,
+        timings: {
+          pluginMs: round2(performance.now() - t0),
+          cwdMs,
+          daemonMs: null,
+        },
         fallback: true,
         fallbackReason: "daemon_unavailable",
         message:
@@ -269,6 +273,71 @@ async function executeFastsh(args) {
   };
 }
 
+async function executeFastsh(args) {
+  const t0 = performance.now();
+  const rawBatch = args && Array.isArray(args.commands) ? args.commands : null;
+  const single = args && typeof args.command === "string" ? args.command.trim() : "";
+
+  // commands 优先于 command；两者都缺则回退
+  let list;
+  let isBatch = false;
+  if (rawBatch && rawBatch.length) {
+    list = rawBatch.map((c) => (typeof c === "string" ? c.trim() : "")).filter(Boolean);
+    isBatch = true;
+    if (!list.length) {
+      return {
+        ok: false,
+        fallback: true,
+        fallbackReason: "empty_command",
+        message: "commands 数组里没有有效命令。请改用内置 Bash 工具。",
+      };
+    }
+    if (list.length > MAX_BATCH) {
+      return {
+        ok: false,
+        fallback: true,
+        fallbackReason: "batch_too_large",
+        message: "批量一次最多 " + MAX_BATCH + " 条命令（收到 " + list.length + " 条）。请拆成多次调用。",
+      };
+    }
+  } else if (single) {
+    list = [single];
+  } else {
+    return {
+      ok: false,
+      fallback: true,
+      fallbackReason: "empty_command",
+      message: "缺少 command 或 commands 参数。请改用内置 Bash 工具。",
+    };
+  }
+
+  const tCwd = performance.now();
+  const cwd = await resolveCwd(args && args.cwd);
+  const cwdMs = round2(performance.now() - tCwd);
+  const timeoutMs = normalizeTimeout(args && args.timeoutMs);
+
+  if (!isBatch) {
+    return runOne(list[0], cwd, timeoutMs, cwdMs);
+  }
+
+  // 批量：顺序执行（保持命令间顺序语义），一次工具调用摊薄宿主地板与模型轮次
+  const results = [];
+  for (const cmd of list) {
+    results.push(await runOne(cmd, cwd, timeoutMs, cwdMs));
+  }
+  const okCount = results.filter((r) => r.ok).length;
+  return {
+    ok: okCount === results.length,
+    batch: true,
+    count: results.length,
+    okCount,
+    results,
+    timings: { pluginMs: round2(performance.now() - t0), cwdMs },
+    message:
+      "批量执行 " + results.length + " 条命令，" + okCount + " 条成功。各条结果按顺序在 results 数组中。",
+  };
+}
+
 /* -------------------------------------------------------------------- 生命周期 */
 
 async function onLoad() {
@@ -284,7 +353,11 @@ async function onLoad() {
       "If the result has fallback=true, do NOT retry here: call the Bash tool instead, because this command was refused as needing PowerShell semantics " +
       "(reasons: pwsh_env_var, pwsh_cmdlet, pwsh_param, pwsh_operator, pwsh_script, pwsh_array, pwsh_block, win_backslash_path, win_relative_path, posix_parse_error, command_not_found, cwd_not_found, daemon_unavailable). " +
       "Prefer this tool for read-only inspection (ls, cat, grep, find, wc, head, tail, stat, pwd) and simple pipelines; " +
-      "use the Bash tool for anything touching PowerShell, cmdlets, .ps1 scripts, Windows backslash paths, or long-running builds.",
+      "use the Bash tool for anything touching PowerShell, cmdlets, .ps1 scripts, Windows backslash paths, or long-running builds. " +
+      "To batch several quick commands in ONE call, pass `commands` (array of strings, up to 20): they run sequentially " +
+      "in order and each result comes back in `results[]` with its own stdout/exitCode — use this to save round-trips. " +
+      "Batched commands do NOT short-circuit on failure: if one fails the rest still run (see okCount), so send " +
+      "commands one at a time when a later command depends on an earlier one's success.",
     risk: "medium",
     schema: {
       type: "object",
@@ -292,7 +365,13 @@ async function onLoad() {
         command: {
           type: "string",
           description:
-            "The POSIX command to run, e.g. 'ls -la' or 'cat package.json | head -20'. Use forward-slash paths and POSIX syntax.",
+            "A single POSIX command, e.g. 'ls -la' or 'cat package.json | head -20'. Use forward-slash paths and POSIX syntax. Provide either command or commands.",
+        },
+        commands: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Batch of POSIX commands (max 20) run sequentially in one call; results return in results[] in order. Use instead of command for multiple quick inspections. Batched commands do NOT short-circuit on failure: if one fails the rest still run (see okCount); send them one at a time when a later command depends on an earlier one's success.",
         },
         cwd: {
           type: "string",
@@ -300,10 +379,10 @@ async function onLoad() {
         },
         timeoutMs: {
           type: "number",
-          description: "Optional timeout in milliseconds (1000-600000). Defaults to 60000.",
+          description: "Optional per-command timeout in milliseconds (1000-600000). Defaults to 60000.",
         },
       },
-      required: ["command"],
+      required: [],
     },
     execute: executeFastsh,
   });

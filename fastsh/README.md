@@ -97,6 +97,35 @@ Windows 上这些命令要么不存在、要么 System32 里躺着语义完全�
 
 `main.js` 的 `resolveCwd` 会依次尝试宿主的 `pi.workspace.get/getActive/current/resolve`，兼容同步与返回 Promise 两种形状。只有全部失败才退回插件进程 cwd。daemon 侧对拿到的目录做 `Stat` + `IsDir` + `Chdir` 校验，任何一步失败都返回 `cwd_not_found` 而不是硬跑。
 
+## 批量命令（commands[]）
+
+一次工具调用发多条命令，摊薄宿主地板与模型轮次：
+
+```jsonc
+{ "commands": ["ls -la", "cat package.json | head -20", "wc -l src/main.go"] }
+```
+
+- 与 `command` 二选一（同时给则 `commands` 优先）；最多 **20** 条，超出回退 `batch_too_large`。
+- **顺序执行**，保持命令间顺序语义；返回 `{ ok, batch:true, count, okCount, results:[...] }`。
+- 收益在**宿主级**：N 条合并只付 1 次宿主地板 + 1 个模型轮次，省 (N−1) 次。
+  插件层 pluginMs ≈ 逐条合计（内部串行），别拿 pluginMs 衡量批量收益。
+- 注意：fastsh daemon 仍是**串行**循环（内部 0–6ms，排队可忽略），并发池只在 pwshd 侧。
+
+## 计时口径（重要）
+
+结果里的 `timings` 字段是插件自计时，**不依赖宿主日志、不受并发归因污染**：
+
+| 字段 | 含义 |
+|---|---|
+| `pluginMs` | execute 全流程（含 IPC、cwd 解析、序列化） |
+| `cwdMs` | resolveCwd 耗时（本机 0.01–0.6ms，无优化空间） |
+| `daemonMs` | daemon 内部 handle 耗时（本机 0–6ms） |
+
+- `pluginMs − daemonMs ≈ IPC + cwd + 序列化`。fastsh 插件层 pluginMs 中位 ~0.4ms。
+- **宿主级**耗时 ≈ pluginMs + 固定宿主地板（本机 ~39ms），需从宿主会话 JSONL 取。
+- **采样规则**：顺序单调用取 ≥5 次中位数；**禁止用并发样本的宿主级计时算倍数**（宿主会把墙钟全记到一条、其余记 0，产生伪值）。
+- 不要拿 daemon 内部数（0–6ms）去对比宿主级数算倍数——口径不同。
+
 ## 权限与安全
 
 - 声明 `agent.tool.register`（注册工具）与 `agent.prompt.inject`（把技能目录带进提示词）。
@@ -121,7 +150,7 @@ node tests/daemon.test.cjs   # 直接驱动 bin/fastsh.exe：shim 语义 + 死�
 node tests/plugin.test.cjs   # 模拟宿主：工具注册、cwd 解析、fallback 格式、性能、崩溃自恢复
 ```
 
-当前结果：**51 + 33 = 84 项断言全部通过**，常驻调用平均 0.20ms/次。
+当前结果：**51 + 38 = 89 项断言全部通过**，常驻调用平均 0.20ms/次。
 
 `tests/daemon.test.cjs` 覆盖：
 1. shim 语义精确断言（wc/head/tail/grep/sed/find/sort/uniq/tr…）
