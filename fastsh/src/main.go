@@ -11,39 +11,46 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
 
 // Request 是插件侧发来的单条命令请求
 type Request struct {
-	ID        int               `json:"id"`
-	Command   string            `json:"command"`
-	Cwd       string            `json:"cwd"`
-	TimeoutMs int               `json:"timeoutMs"`
-	Env       map[string]string `json:"env"`
-	Shutdown  bool              `json:"shutdown"`
+	ID          int               `json:"id"`
+	Command     string            `json:"command"`
+	Cwd         string            `json:"cwd"`
+	TimeoutMs   int               `json:"timeoutMs"`
+	Env         map[string]string `json:"env"`
+	ExpiresAt   int64             `json:"expiresAt"`
+	OutputLimit *int              `json:"outputLimit"`
+	Shutdown    bool              `json:"shutdown"`
 }
 
 // Response 是执行结果；Fallback=true 表示这条命令不该走 sh，应回退到 pwsh
 type Response struct {
-	ID         int    `json:"id"`
-	OK         bool   `json:"ok"`
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
-	ExitCode   int    `json:"exitCode"`
-	DurationMs int64  `json:"durationMs"`
-	Fallback   bool   `json:"fallback"`
-	Reason     string `json:"reason"`
+	ID              int    `json:"id"`
+	OK              bool   `json:"ok"`
+	Stdout          string `json:"stdout"`
+	Stderr          string `json:"stderr"`
+	ExitCode        int    `json:"exitCode"`
+	DurationMs      int64  `json:"durationMs"`
+	Fallback        bool   `json:"fallback"`
+	Reason          string `json:"reason"`
+	ExecutionState  string `json:"executionState,omitempty"`
+	StdoutTruncated bool   `json:"stdoutTruncated,omitempty"`
+	StderrTruncated bool   `json:"stderrTruncated,omitempty"`
 }
 
 const (
-	maxOutputBytes = 8 << 20  // 单次输出上限 8MB，防 OOM
+	maxOutputBytes = 8 << 20   // 单次输出上限 8MB，防 OOM
 	defaultTimeout = 60 * 1000 // 默认 60s
 )
 
@@ -79,12 +86,11 @@ func safeHandle(req Request) (resp Response) {
 	defer func() {
 		if r := recover(); r != nil {
 			resp = Response{
-				ID:       req.ID,
-				OK:       false,
-				Fallback: true,
-				Reason:   "daemon_panic",
-				Stderr:   fmt.Sprintf("fastsh: 守护进程内部错误: %v", r),
-				ExitCode: 1,
+				ID:             req.ID,
+				ExecutionState: "unknown",
+				Reason:         "daemon_panic",
+				Stderr:         fmt.Sprintf("fastsh: 守护进程内部错误: %v", r),
+				ExitCode:       1,
 			}
 		}
 	}()
@@ -104,32 +110,36 @@ func writeResp(w *bufio.Writer, r Response) {
 func handle(req Request) Response {
 	start := time.Now()
 	resp := Response{ID: req.ID}
+	if expired(req) {
+		return expiredResponse(req.ID)
+	}
 
-	// 1) 回退判定：PowerShell 专有语法直接不执行，交给内置 Bash
-	if bad, reason := looksLikePowerShell(req.Command); bad {
-		resp.OK = false
+	prog, err := syntax.NewParser().Parse(strings.NewReader(req.Command), "")
+	if reason := powerShellReason(req.Command, prog, err); reason != "" {
 		resp.Fallback = true
 		resp.Reason = reason
 		resp.ExitCode = 2
+		if err != nil {
+			resp.Stderr = "fastsh: POSIX 解析失败: " + err.Error()
+		}
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
 
-	// 2) 解析 POSIX 语法
-	prog, err := syntax.NewParser().Parse(strings.NewReader(req.Command), "")
-	if err != nil {
-		resp.OK = false
+	// 目录只属于本次解释器，不修改进程 cwd。
+	cwd := filepath.Clean(req.Cwd)
+	fi, statErr := os.Stat(cwd)
+	if !filepath.IsAbs(cwd) || statErr != nil || !fi.IsDir() {
 		resp.Fallback = true
-		resp.Reason = "posix_parse_error"
-		resp.ExitCode = 2
-		resp.Stderr = "fastsh: POSIX 解析失败（可能是 PowerShell 语法）: " + err.Error()
+		resp.Reason = "cwd_not_found"
+		resp.ExitCode = 1
+		resp.Stderr = fmt.Sprintf("fastsh: 工作目录不可用: %s", req.Cwd)
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
-
-	// 3) 首命令可用性检查：不在内置/coreutils/PATH 中则回退
-	if name, ok := firstCommandName(prog); ok && !commandAvailable(name) {
-		resp.OK = false
+	env := expand.ListEnviron(append(os.Environ(), envPairs(req.Env)...)...)
+	// 只预检没有前置状态变更的直接命令；脚本中的后续失败不允许整段回退。
+	if name, ok := firstCommandName(prog); ok && !commandAvailable(cwd, env, name) {
 		resp.Fallback = true
 		resp.Reason = "command_not_found"
 		resp.ExitCode = 127
@@ -138,40 +148,15 @@ func handle(req Request) Response {
 		return resp
 	}
 
-	// 4) 工作目录：必须真实可用，否则一律回退。
-	// 绝不能在"目录无效时静默沿用上一个请求的 cwd"下继续跑，那会把 rm/cp/mv 打到错误的目录里。
-	cwd := normalizeCwd(req.Cwd)
-	abs, aerr := filepath.Abs(cwd)
-	if aerr != nil {
-		abs = cwd
-	}
-	if fi, serr := os.Stat(abs); serr != nil || !fi.IsDir() {
-		resp.OK = false
-		resp.Fallback = true
-		resp.Reason = "cwd_not_found"
-		resp.ExitCode = 1
-		resp.Stderr = fmt.Sprintf("fastsh: 工作目录不可用: %s", abs)
-		resp.DurationMs = time.Since(start).Milliseconds()
-		return resp
-	}
-	// daemon 串行处理命令，把进程 cwd 切到请求目录，这样 coreutils shim 里的
-	// 相对路径与解释器自身的重定向/cd 完全一致。
-	if cerr := os.Chdir(abs); cerr != nil {
-		resp.OK = false
-		resp.Fallback = true
-		resp.Reason = "cwd_not_found"
-		resp.ExitCode = 1
-		resp.Stderr = fmt.Sprintf("fastsh: 无法切换工作目录 %s: %v", abs, cerr)
-		resp.DurationMs = time.Since(start).Milliseconds()
-		return resp
-	}
-	cwd = abs
-
 	timeoutMs := req.TimeoutMs
 	if timeoutMs <= 0 {
 		timeoutMs = defaultTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	if req.ExpiresAt != 0 && time.UnixMilli(req.ExpiresAt).Before(deadline) {
+		deadline = time.UnixMilli(req.ExpiresAt)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 
 	rOut, wOut, err := os.Pipe()
@@ -196,19 +181,27 @@ func handle(req Request) Response {
 		resp.DurationMs = time.Since(start).Milliseconds()
 		return resp
 	}
+	defer rOut.Close()
+	defer wOut.Close()
+	defer rErr.Close()
+	defer wErr.Close()
 
 	// 关键修复：读取端必须与 runner.Run 并发跑。
 	// 之前是 Run 跑完再读管道，输出超过 Windows 匿名管道缓冲（实测约 4KB）后
 	// 写端阻塞、Run 永不返回，daemon 直接变砖（连 echo 都不再响应）。
-	outCh := readAsync(rOut)
-	errCh := readAsync(rErr)
+	limit := maxOutputBytes
+	if req.OutputLimit != nil {
+		limit = max(0, min(limit, *req.OutputLimit))
+	}
+	outCh := readAsync(rOut, limit)
+	errCh := readAsync(rErr, limit)
 
 	base := interp.DefaultExecHandler(2 * time.Second)
 	runner, err := interp.New(
 		interp.Dir(cwd),
 		interp.StdIO(strings.NewReader(""), wOut, wErr),
 		interp.ExecHandler(makeExecHandler(base)),
-		interp.Params(append(os.Environ(), envPairs(req.Env)...)...),
+		interp.Env(env),
 	)
 	if err != nil {
 		// 必须关掉写端，读取 goroutine 才会读到 EOF 并退出，否则这里就泄漏了。
@@ -227,6 +220,9 @@ func handle(req Request) Response {
 		return resp
 	}
 
+	if expired(req) {
+		return expiredResponse(req.ID)
+	}
 	runErr := runner.Run(ctx, prog)
 	wOut.Close()
 	wErr.Close()
@@ -237,35 +233,46 @@ func handle(req Request) Response {
 	rErr.Close()
 
 	resp.ExitCode = 0
-	if runErr != nil {
+	if ctx.Err() == context.DeadlineExceeded {
+		resp.ExitCode = 124
+		errRes.data += "\nfastsh: 命令超时"
+	} else if runErr != nil {
 		var es interp.ExitStatus
 		if errors.As(runErr, &es) {
 			resp.ExitCode = int(es)
-		} else if ctx.Err() == context.DeadlineExceeded {
-			resp.ExitCode = 124
-			errRes.data += "\nfastsh: 命令超时"
 		} else {
 			resp.ExitCode = 1
 			errRes.data += "\nfastsh: " + runErr.Error()
 		}
-	} else if ctx.Err() == context.DeadlineExceeded {
-		// 命令在超时后才正常返回（例如 shim 自己看到了 ctx.Done）：仍标记为超时
-		resp.ExitCode = 124
-		errRes.data += "\nfastsh: 命令超时"
 	}
 
-	resp.Stdout = outRes.data
-	resp.Stderr = errRes.data
-	if outRes.truncated {
-		resp.Stdout += fmt.Sprintf("\n[fastsh] 输出超过 %dMB 已截断", maxOutputBytes>>20)
-	}
-	if errRes.truncated {
-		resp.Stderr += fmt.Sprintf("\n[fastsh] 错误输出超过 %dMB 已截断", maxOutputBytes>>20)
-	}
+	resp.Stdout, resp.StdoutTruncated = capText(outRes.data, limit, outRes.truncated)
+	resp.Stderr, resp.StderrTruncated = capText(errRes.data, limit-len(resp.Stdout), errRes.truncated)
 
 	resp.OK = resp.ExitCode == 0
 	resp.DurationMs = time.Since(start).Milliseconds()
 	return resp
+}
+
+func expired(req Request) bool {
+	return req.ExpiresAt != 0 && time.Now().UnixMilli() >= req.ExpiresAt
+}
+
+func expiredResponse(id int) Response {
+	return Response{ID: id, ExecutionState: "not_started", Reason: "request_expired", ExitCode: 124}
+}
+
+func capText(text string, limit int, truncated bool) (string, bool) {
+	// 归一化无效文本，保证 JSON 序列化不会在截断后扩大字节数。
+	text = strings.ToValidUTF8(text, "\uFFFD")
+	if len(text) <= limit {
+		return text, truncated
+	}
+	end := limit
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	return text[:end], true
 }
 
 // pipeResult 是一个管道读取 goroutine 的结果
@@ -276,10 +283,10 @@ type pipeResult struct {
 
 // readAsync 立即在 goroutine 里排空管道，返回结果通道。
 // 调用方必须在关闭写端之后读取这个通道。
-func readAsync(r *os.File) <-chan pipeResult {
+func readAsync(r *os.File, limit int) <-chan pipeResult {
 	ch := make(chan pipeResult, 1)
 	go func() {
-		data, truncated := readCapped(r)
+		data, truncated := readCapped(r, limit)
 		ch <- pipeResult{data: data, truncated: truncated}
 	}()
 	return ch
@@ -287,14 +294,14 @@ func readAsync(r *os.File) <-chan pipeResult {
 
 // readCapped 读取内容并限制大小。
 // 超过上限后**继续读取并丢弃**，否则写端会再次阻塞，重新变成死锁。
-func readCapped(r io.Reader) (string, bool) {
-	buf := make([]byte, 0, 64<<10)
+func readCapped(r io.Reader, limit int) (string, bool) {
+	buf := make([]byte, 0, min(64<<10, limit))
 	tmp := make([]byte, 32<<10)
 	truncated := false
 	for {
 		n, err := r.Read(tmp)
 		if n > 0 {
-			if remain := maxOutputBytes - len(buf); remain > 0 {
+			if remain := limit - len(buf); remain > 0 {
 				if n <= remain {
 					buf = append(buf, tmp[:n]...)
 				} else {
@@ -316,6 +323,18 @@ func readCapped(r io.Reader) (string, bool) {
 type shimIO struct {
 	stdin          io.Reader
 	stdout, stderr io.Writer
+	dir            string
+}
+
+// resolvePath 让文件操作与 cd、子 shell、重定向共享同一个解释器目录。
+func (s shimIO) resolvePath(p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	if runtime.GOOS == "windows" && os.IsPathSeparator(p[0]) {
+		return filepath.VolumeName(s.dir) + p
+	}
+	return filepath.Join(s.dir, p)
 }
 
 // makeExecHandler 包装默认执行器：PATH 里找不到的命令改用 Go 原生实现。
@@ -326,8 +345,8 @@ func makeExecHandler(base interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 			return base(ctx, args)
 		}
 		hc := interp.HandlerCtx(ctx)
-		ioSet := shimIO{stdin: hc.Stdin, stdout: hc.Stdout, stderr: hc.Stderr}
-		name := normalizeCmdName(filepath.Base(args[0]))
+		ioSet := shimIO{stdin: hc.Stdin, stdout: hc.Stdout, stderr: hc.Stderr, dir: hc.Dir}
+		name := normalizeCmdName(args[0])
 		if fn, ok := coreutils[name]; ok {
 			// shim 一律优先：Windows 上同名程序多是语义不同的古董（System32 的 sort.exe/find.exe）
 			return fn(ctx, args[1:], ioSet)
@@ -336,26 +355,12 @@ func makeExecHandler(base interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	}
 }
 
-// normalizeCmdName 去掉 Windows 可执行后缀，统一成小写比较用的原名
+// 只拦截裸命令名；显式路径必须按实际程序执行。
 func normalizeCmdName(n string) string {
-	n = strings.TrimSuffix(n, ".exe")
-	n = strings.TrimSuffix(n, ".EXE")
+	if strings.EqualFold(filepath.Ext(n), ".exe") {
+		return n[:len(n)-4]
+	}
 	return n
-}
-
-// normalizeCwd 把 Windows 路径转成 sh v3 可接受的形式
-func normalizeCwd(cwd string) string {
-	if cwd == "" {
-		if wd, err := os.Getwd(); err == nil {
-			return wd
-		}
-		return "."
-	}
-	// 反斜杠转正斜杠（盘符路径在 sh v3 下可用）
-	if len(cwd) >= 2 && cwd[1] == ':' {
-		return strings.ReplaceAll(cwd, "\\", "/")
-	}
-	return cwd
 }
 
 func envPairs(env map[string]string) []string {
@@ -369,45 +374,23 @@ func envPairs(env map[string]string) []string {
 	return out
 }
 
-// firstCommandName 从 AST 里取第一个简单命令名（跳过前导变量赋值）
+// 脚本里可重新定义命令或修改 PATH，只预检开头直接出现的简单调用。
 func firstCommandName(prog *syntax.File) (string, bool) {
-	found := false
-	var cmdName string
-	syntax.Walk(prog, func(node syntax.Node) bool {
-		if found {
-			return false
+	if len(prog.Stmts) > 0 {
+		if call, ok := prog.Stmts[0].Cmd.(*syntax.CallExpr); ok && len(call.Assigns) == 0 && len(call.Args) > 0 {
+			return literalWord(call.Args[0])
 		}
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-		lit := call.Args[0]
-		if len(lit.Parts) == 0 {
-			return true
-		}
-		switch p := lit.Parts[0].(type) {
-		case *syntax.Lit:
-			cmdName = normalizeCmdName(p.Value)
-		case *syntax.SglQuoted:
-			cmdName = normalizeCmdName(p.Value)
-		default:
-			return true // 复杂表达式，跳过首命令可用性检查
-		}
-		found = true
-		return false
-	})
-	return cmdName, found
+	}
+	return "", false
 }
 
-// commandAvailable 判断命令在 POSIX 环境下是否可执行
-func commandAvailable(name string) bool {
+func commandAvailable(cwd string, env expand.Environ, name string) bool {
 	if interp.IsBuiltin(name) {
 		return true
 	}
-	if _, ok := coreutils[name]; ok {
+	if _, ok := coreutils[normalizeCmdName(name)]; ok {
 		return true
 	}
-	// 其余交给 PATH 判定（git/node 等真实 Windows 程序）
-	_, err := exec.LookPath(name)
+	_, err := interp.LookPathDir(cwd, env, name)
 	return err == nil
 }

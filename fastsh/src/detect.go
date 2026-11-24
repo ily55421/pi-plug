@@ -1,58 +1,105 @@
 package main
 
-// detect.go：判断一条命令是否用了 PowerShell 专有语法。
-// 原则：宁错杀不错漏 —— 错杀只是回退到 pwsh（慢但正确），
-// 漏杀会让命令在 POSIX 下静默产生错误结果。
-import "regexp"
+import (
+	"regexp"
+	"strings"
 
-var (
-	// PowerShell 作用域变量：$env: / ${env: / $using: 等（POSIX 无此语法）
-	reEnvScope = regexp.MustCompile(`\$\{?(env|global|script|using|local|private|variable):`)
-
-	// cmdlet：Verb-Noun 形式（PowerShell 专有，POSIX 无连字符命令）
-	reCmdlet = regexp.MustCompile(`(?i)\b(get|set|new|remove|select|where|foreach-object|measure|test|import|export|copy|move|out|join|split|format|invoke|add|clear|group|write|compare|convert|tee|start|stop|restart|resolve|search|show|read|update|mount|unmount|enable|disable|lock|unlock|grant|revoke|enter|exit|wait|watch|debug|trace|repair|optimize|install|uninstall|save|restore|backup|limit|select)-[A-Za-z]+\b`)
-
-	// PowerShell 专有参数（POSIX 工具几乎不会用这些名字）
-	rePwshParam = regexp.MustCompile(`(?i)(?:^|\s)-(?:ErrorAction|ExecutionPolicy|NonInteractive|NoProfile|Passthru|ErrorVariable|InformationVariable|OutVariable|WarningVariable|OutBuffer|InformationAction|WarningAction)(?:\s|=|$)`)
-
-	// PowerShell 比较运算符
-	rePwshOp = regexp.MustCompile(`(?:^|\s)-(?:eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|notin|is|isnot|as)(?:\s|$)`)
-
-	// .ps1 脚本
-	rePs1 = regexp.MustCompile(`(?i)\.ps1\b`)
-
-	// 数组/哈希字面量
-	rePwshArray = regexp.MustCompile(`(?:^|[\s|(])[@]\(`)
-
-	// ForEach-Object / Where-Object 简写
-	rePwshBlock = regexp.MustCompile(`(?:^|[\s|(])[%?]\{`)
-
-	// Windows 反斜杠路径：C:\... 或 .\...
-	reWinPath = regexp.MustCompile(`[A-Za-z]:\\`)
-	reDotSlash = regexp.MustCompile(`(?:^|[\s;&|("'])\.\\`)
+	"mvdan.cc/sh/v3/syntax"
 )
 
-// looksLikePowerShell 返回 (是否像 PowerShell, 原因)
-func looksLikePowerShell(cmd string) (bool, string) {
-	switch {
-	case reEnvScope.MatchString(cmd):
-		return true, "pwsh_env_var"
-	case reCmdlet.MatchString(cmd):
-		return true, "pwsh_cmdlet"
-	case rePwshParam.MatchString(cmd):
-		return true, "pwsh_param"
-	case rePwshOp.MatchString(cmd):
-		return true, "pwsh_operator"
-	case rePs1.MatchString(cmd):
-		return true, "pwsh_script"
-	case rePwshArray.MatchString(cmd):
-		return true, "pwsh_array"
-	case rePwshBlock.MatchString(cmd):
-		return true, "pwsh_block"
-	case reWinPath.MatchString(cmd):
-		return true, "win_backslash_path"
-	case reDotSlash.MatchString(cmd):
-		return true, "win_relative_path"
+var (
+	reEnvScope  = regexp.MustCompile(`(?i)^\$\{?(env|global|script|using|local|private|variable):[a-z_]`)
+	reCmdlet    = regexp.MustCompile(`(?i)^(?:get|set|new|remove|select|where|foreach|measure|test|import|export|copy|move|out|join|split|format|invoke|add|clear|group|write|compare|convert|tee|start|stop|restart|resolve|search|show|read|update|mount|unmount|enable|disable|lock|unlock|grant|revoke|enter|exit|wait|watch|debug|trace|repair|optimize|install|uninstall|save|restore|backup|limit)-[a-z]+$`)
+	rePwshParam = regexp.MustCompile(`(?i)^-(?:ErrorAction|ExecutionPolicy|NonInteractive|NoProfile|Passthru|ErrorVariable|InformationVariable|OutVariable|WarningVariable|OutBuffer|InformationAction|WarningAction)(?:=|$)`)
+	rePwshOp    = regexp.MustCompile(`(?i)^-(?:eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|notin|is|isnot|as)$`)
+	rePwshArray = regexp.MustCompile(`(?:^|[\s|(])@\(`)
+	rePwshBlock = regexp.MustCompile(`(?:^|[\s|(])[%?]\{`)
+	reWinPath   = regexp.MustCompile(`^[A-Za-z]:\\`)
+)
+
+// literalWord 只读静态单词；不要把带扩展的单词前缀当成完整命令。
+func literalWord(w *syntax.Word) (string, bool) {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			if strings.Contains(p.Value, "\\") {
+				return "", false
+			}
+			b.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			if p.Dollar {
+				return "", false
+			}
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, child := range p.Parts {
+				lit, ok := child.(*syntax.Lit)
+				if !ok || strings.Contains(lit.Value, "\\") {
+					return "", false
+				}
+				b.WriteString(lit.Value)
+			}
+		default:
+			return "", false
+		}
 	}
-	return false, ""
+	return b.String(), true
+}
+
+func powerShellReason(command string, prog *syntax.File, parseErr error) string {
+	if parseErr != nil {
+		// 解析失败时无论如何都不会执行；这里只补充诊断原因。
+		switch {
+		case reEnvScope.MatchString(strings.TrimSpace(command)):
+			return "pwsh_env_var"
+		case rePwshArray.MatchString(command):
+			return "pwsh_array"
+		case rePwshBlock.MatchString(command):
+			return "pwsh_block"
+		default:
+			return "posix_parse_error"
+		}
+	}
+
+	reason := ""
+	src := func(node syntax.Node) string { return command[node.Pos().Offset():node.End().Offset()] }
+	syntax.Walk(prog, func(node syntax.Node) bool {
+		if reason != "" {
+			return false
+		}
+		switch n := node.(type) {
+		case *syntax.ParamExp:
+			if reEnvScope.MatchString(src(n)) || n.Short && reEnvScope.MatchString(command[n.Pos().Offset():]) {
+				reason = "pwsh_env_var"
+			}
+		case *syntax.CallExpr:
+			if len(n.Args) == 0 {
+				return true
+			}
+			name, _ := literalWord(n.Args[0])
+			for i, arg := range n.Args {
+				raw := src(arg)
+				switch {
+				case i == 0 && strings.HasSuffix(strings.ToLower(strings.Trim(raw, `"'`)), ".ps1"):
+					reason = "pwsh_script"
+				case i == 0 && reCmdlet.MatchString(raw):
+					reason = "pwsh_cmdlet"
+				case reWinPath.MatchString(raw):
+					reason = "win_backslash_path"
+				case strings.HasPrefix(raw, `.\`):
+					reason = "win_relative_path"
+				case i > 0 && rePwshParam.MatchString(raw):
+					reason = "pwsh_param"
+				case i > 0 && name != "[" && name != "test" && rePwshOp.MatchString(raw):
+					reason = "pwsh_operator"
+				}
+				if reason != "" {
+					break
+				}
+			}
+		}
+		return reason == ""
+	})
+	return reason
 }

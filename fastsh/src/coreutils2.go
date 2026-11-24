@@ -155,19 +155,21 @@ func shimGrep(ctx context.Context, args []string, io shimIO) error {
 	} else {
 		for _, f := range files {
 			if recursive {
-				filepath.Walk(f, func(p string, info os.FileInfo, err error) error {
+				root := io.resolvePath(f)
+				filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 					if err != nil || info.IsDir() {
 						return nil
 					}
 					b, rerr := os.ReadFile(p)
 					if rerr == nil {
-						emit(p, b)
+						rel, _ := filepath.Rel(root, p)
+						emit(filepath.Join(f, rel), b)
 					}
 					return nil
 				})
 				continue
 			}
-			b, err := os.ReadFile(f)
+			b, err := os.ReadFile(io.resolvePath(f))
 			if err != nil {
 				errOut(io, fmt.Sprintf("grep: %v\n", err))
 				return exitCode(2)
@@ -241,7 +243,7 @@ func shimSed(ctx context.Context, args []string, io shimIO) error {
 		apply(readAllStdin(io.stdin))
 	} else {
 		for _, f := range files {
-			b, err := os.ReadFile(f)
+			b, err := os.ReadFile(io.resolvePath(f))
 			if err != nil {
 				errOut(io, fmt.Sprintf("sed: %v\n", err))
 				continue
@@ -274,7 +276,7 @@ func shimSort(ctx context.Context, args []string, io shimIO) error {
 		lines = splitLines(readAllStdin(io.stdin))
 	} else {
 		for _, f := range files {
-			b, err := os.ReadFile(f)
+			b, err := os.ReadFile(io.resolvePath(f))
 			if err != nil {
 				errOut(io, fmt.Sprintf("sort: %v\n", err))
 				return exitCode(2)
@@ -329,7 +331,7 @@ func shimUniq(ctx context.Context, args []string, io shimIO) error {
 		lines = splitLines(readAllStdin(io.stdin))
 	} else {
 		for _, f := range files {
-			b, err := os.ReadFile(f)
+			b, err := os.ReadFile(io.resolvePath(f))
 			if err != nil {
 				errOut(io, fmt.Sprintf("uniq: %v\n", err))
 				return exitCode(2)
@@ -414,7 +416,7 @@ func shimFind(ctx context.Context, args []string, io shimIO) error {
 	for _, root := range roots {
 		var walk func(dir string, d int)
 		walk = func(dir string, d int) {
-			entries, err := os.ReadDir(dir)
+			entries, err := os.ReadDir(io.resolvePath(dir))
 			if err != nil {
 				return
 			}

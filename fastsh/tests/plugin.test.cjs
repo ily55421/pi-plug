@@ -143,6 +143,13 @@ function norm(s) {
     badCwd.fallback === true && badCwd.fallbackReason === "cwd_not_found",
     `fallback=${badCwd.fallback} reason=${badCwd.fallbackReason}`
   );
+  const relative = await registered.execute({ command: "pwd", cwd: "tests" });
+  check("相对 cwd 以工作区为基准", norm(relative.stdout) === norm(explicit.stdout));
+  const savedWorkspace = global.pi.workspace;
+  global.pi.workspace = { get: () => null };
+  const missing = await registered.execute({ command: "echo must-not-run" });
+  global.pi.workspace = savedWorkspace;
+  check("工作区不可用不使用安装目录", missing.executionState === "not_started" && missing.fallbackReason === "cwd_not_found");
 
   /* ---------------------------------------------------------- 空命令防护 */
   console.log("\n== 4. 参数校验 ==");
@@ -178,17 +185,29 @@ function norm(s) {
   check("批量超限回退", tooMany.fallback === true && tooMany.fallbackReason === "batch_too_large", tooMany.fallbackReason);
   const emptyBatch = await registered.execute({ commands: ["  "] });
   check("批量全空回退", emptyBatch.fallback === true && emptyBatch.fallbackReason === "empty_command", emptyBatch.fallbackReason);
+  const budget = await registered.execute({ commands: ["seq 1 1300000", "printf overflow"], timeoutMs: 18000 });
+  check("批量共享 8 MiB 输出预算", budget.ok && budget.results.every((r) => r.stdoutTruncated) &&
+    budget.results.reduce((sum, r) => sum + Buffer.byteLength(r.stdout) + Buffer.byteLength(r.stderr), 0) <= 8 * 1024 * 1024);
+  const expiredBatch = await registered.execute({ commands: ["sleep 2", "echo must-not-run"], batchTimeoutMs: 1000 });
+  check("批量过期不提交下一条", expiredBatch.results[1].executionState === "not_started" && expiredBatch.results[1].reason === "batch_deadline");
+  const abort = new AbortController();
+  abort.abort();
+  const cancelled = await registered.execute({ command: "echo must-not-run" }, { signal: abort.signal });
+  check("取消后不提交命令", cancelled.executionState === "not_started" && cancelled.reason === "cancelled");
 
   /* ------------------------------------------------------ 崩溃自恢复 */
   console.log("\n== 7. 崩溃自恢复 ==");
   const pid = plugin.__test.daemonPid();
   check("能拿到 daemon pid", typeof pid === "number" && pid > 0, String(pid));
+  const inflight = registered.execute({ command: "sleep 3; echo this-must-not-replay", timeoutMs: 6000 });
+  await new Promise((r) => setTimeout(r, 120));
   try {
     execFileSync("taskkill", ["/F", "/PID", String(pid)], { stdio: "ignore" });
   } catch {
     /* 可能已经退出 */
   }
-  await new Promise((r) => setTimeout(r, 300));
+  const lost = await inflight;
+  check("响应丢失：未知状态、禁止回退重放", lost.executionState === "unknown" && lost.fallback === false && lost.exitCode === null && plugin.__test.daemonPid() === null);
   const after = await registered.execute({ command: "echo recovered" });
   check(
     "杀掉 daemon 后自动重启",

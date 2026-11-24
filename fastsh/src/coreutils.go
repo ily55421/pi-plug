@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -132,10 +131,10 @@ func shimLs(ctx context.Context, args []string, io shimIO) error {
 		paths = []string{"."}
 	}
 	for _, p := range paths {
-		entries, err := os.ReadDir(p)
+		entries, err := os.ReadDir(io.resolvePath(p))
 		if err != nil {
 			// 单文件参数：ls -l file 应显示该文件本身
-			if info, serr := os.Stat(p); serr == nil && !info.IsDir() {
+			if info, serr := os.Stat(io.resolvePath(p)); serr == nil && !info.IsDir() {
 				sz := strconv.FormatInt(info.Size(), 10)
 				if human {
 					sz = humanSize(info.Size())
@@ -232,7 +231,7 @@ func shimCat(ctx context.Context, args []string, io shimIO) error {
 		if f == "-" {
 			data = readAllStdin(io.stdin)
 		} else {
-			b, err := os.ReadFile(f)
+			b, err := os.ReadFile(io.resolvePath(f))
 			if err != nil {
 				errOut(io, fmt.Sprintf("cat: %s: %v\n", f, err))
 				return exitCode(1)
@@ -272,7 +271,7 @@ func shimCp(ctx context.Context, args []string, io shimIO) error {
 		errOut(io, "cp: 需要源和目标\n")
 		return exitCode(1)
 	}
-	src, dst := rest[0], rest[1]
+	src, dst := io.resolvePath(rest[0]), io.resolvePath(rest[1])
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		errOut(io, fmt.Sprintf("cp: %v\n", err))
@@ -342,6 +341,7 @@ func shimMv(ctx context.Context, args []string, io shimIO) error {
 		errOut(io, "mv: 需要源和目标\n")
 		return exitCode(1)
 	}
+	rest[0], rest[1] = io.resolvePath(rest[0]), io.resolvePath(rest[1])
 	if err := os.Rename(rest[0], rest[1]); err != nil {
 		// 跨设备：复制后删除
 		data, rerr := os.ReadFile(rest[0])
@@ -378,11 +378,11 @@ func shimRm(ctx context.Context, args []string, io shimIO) error {
 	for _, p := range rest {
 		var err error
 		if recursive {
-			err = os.RemoveAll(p)
+			err = os.RemoveAll(io.resolvePath(p))
 		} else {
-			err = os.Remove(p)
+			err = os.Remove(io.resolvePath(p))
 			if err != nil && !force {
-				if fi, serr := os.Stat(p); serr == nil && fi.IsDir() {
+				if fi, serr := os.Stat(io.resolvePath(p)); serr == nil && fi.IsDir() {
 					errOut(io, fmt.Sprintf("rm: %s 是目录（需要 -r）\n", p))
 				}
 			}
@@ -415,9 +415,9 @@ func shimMkdir(ctx context.Context, args []string, io shimIO) error {
 	for _, d := range rest {
 		var err error
 		if parents {
-			err = os.MkdirAll(d, 0o755)
+			err = os.MkdirAll(io.resolvePath(d), 0o755)
 		} else {
-			err = os.Mkdir(d, 0o755)
+			err = os.Mkdir(io.resolvePath(d), 0o755)
 		}
 		if err != nil {
 			errOut(io, fmt.Sprintf("mkdir: %v\n", err))
@@ -436,7 +436,7 @@ func shimRmdir(ctx context.Context, args []string, io shimIO) error {
 		if isFlag(a) {
 			continue
 		}
-		if err := os.Remove(a); err != nil {
+		if err := os.Remove(io.resolvePath(a)); err != nil {
 			errOut(io, fmt.Sprintf("rmdir: %v\n", err))
 			code = 1
 		}
@@ -454,8 +454,9 @@ func shimTouch(ctx context.Context, args []string, io shimIO) error {
 		if isFlag(a) {
 			continue
 		}
-		if _, err := os.Stat(a); os.IsNotExist(err) {
-			f, err := os.Create(a)
+		p := io.resolvePath(a)
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			f, err := os.Create(p)
 			if err != nil {
 				errOut(io, fmt.Sprintf("touch: %v\n", err))
 				code = 1
@@ -463,7 +464,7 @@ func shimTouch(ctx context.Context, args []string, io shimIO) error {
 			}
 			f.Close()
 		} else {
-			if err := os.Chtimes(a, now, now); err != nil {
+			if err := os.Chtimes(p, now, now); err != nil {
 				errOut(io, fmt.Sprintf("touch: %v\n", err))
 				code = 1
 			}
@@ -529,7 +530,7 @@ func shimWc(ctx context.Context, args []string, io shimIO) error {
 		return nil
 	}
 	for _, f := range files {
-		b, err := os.ReadFile(f)
+		b, err := os.ReadFile(io.resolvePath(f))
 		if err != nil {
 			errOut(io, fmt.Sprintf("wc: %v\n", err))
 			return exitCode(1)
@@ -589,7 +590,7 @@ func shimHead(ctx context.Context, args []string, io shimIO) error {
 		return nil
 	}
 	for _, f := range files {
-		b, err := os.ReadFile(f)
+		b, err := os.ReadFile(io.resolvePath(f))
 		if err != nil {
 			errOut(io, fmt.Sprintf("head: %v\n", err))
 			return exitCode(1)
@@ -671,7 +672,7 @@ func shimTail(ctx context.Context, args []string, io shimIO) error {
 		return nil
 	}
 	for _, f := range files {
-		b, err := os.ReadFile(f)
+		b, err := os.ReadFile(io.resolvePath(f))
 		if err != nil {
 			errOut(io, fmt.Sprintf("tail: %v\n", err))
 			return exitCode(1)
@@ -815,7 +816,7 @@ func shimStat(ctx context.Context, args []string, io shimIO) error {
 		if isFlag(a) {
 			continue
 		}
-		info, err := os.Stat(a)
+		info, err := os.Stat(io.resolvePath(a))
 		if err != nil {
 			errOut(io, fmt.Sprintf("stat: %v\n", err))
 			return exitCode(1)
@@ -944,7 +945,7 @@ func shimWhich(ctx context.Context, args []string, io shimIO) error {
 		if isFlag(a) {
 			continue
 		}
-		if p, err := exec.LookPath(a); err == nil {
+		if p, err := interp.LookPathDir(io.dir, interp.HandlerCtx(ctx).Env, a); err == nil {
 			out(io, p+"\n")
 		} else if interp.IsBuiltin(a) {
 			out(io, a+": shell builtin\n")
@@ -964,11 +965,6 @@ func shimTrue(ctx context.Context, args []string, io shimIO) error  { return nil
 func shimFalse(ctx context.Context, args []string, io shimIO) error { return exitCode(1) }
 
 func shimPwd(ctx context.Context, args []string, io shimIO) error {
-	wd, err := os.Getwd()
-	if err != nil {
-		errOut(io, fmt.Sprintf("pwd: %v\n", err))
-		return exitCode(1)
-	}
-	out(io, wd+"\n")
+	out(io, io.dir+"\n")
 	return nil
 }

@@ -59,9 +59,12 @@ function startDaemon() {
           fallback: m.fallback,
           reason: m.reason,
           durationMs: m.durationMs,
+          stdoutTruncated: m.stdoutTruncated,
+          stderrTruncated: m.stderrTruncated,
+          executionState: m.executionState,
         });
       });
-      proc.stdin.write(JSON.stringify({ id, command, cwd, timeoutMs }) + "\n");
+      proc.stdin.write(JSON.stringify({ id, command, cwd, timeoutMs, expiresAt: opts.expiresAt, outputLimit: opts.outputLimit }) + "\n");
     });
   }
   return { proc, run };
@@ -122,6 +125,13 @@ const SEMANTIC_CASES = [
   ["basename /a/b/c.txt", "c.txt", 0],
   ["echo abc | tr a-z A-Z", "ABC", 0],
   ["printf 'a\\nb\\na\\n' | sort | uniq", "a\nb", 0],
+  ["echo 'Get-ChildItem setup.ps1 $env:HOME'", "Get-ChildItem setup.ps1 $env:HOME", 0],
+  ["printf '%s' \"$#\"", "0", 0],
+  ["printf '%s' \"${env:-unset}\"", "unset", 0],
+  ["cd ..; cd tests; find . -name daemon.test.cjs", "daemon.test.cjs", 0],
+  ["(cd ..; head -n 1 manifest.json); head -n 1 main.go", "{\npackage main", 0],
+  ["[ 1 -eq 1 ] && echo equal", "equal", 0],
+  ["probe() { echo works; }; probe", "works", 0],
 ];
 
 // PowerShell 专有语法必须拒绝执行（fallback=true）
@@ -202,16 +212,15 @@ const FALLBACK_CASES = [
   const big = await run("seq 1 2000000", { timeoutMs: 20000 });
   check(
     "seq 1 2000000 超过 8MB 上限",
-    !big.hung && big.stdout.length > 8 * 1024 * 1024 && /已截断/.test(big.stdout),
-    big.hung ? "*** 卡死 ***" : `${big.stdout.length}B，含截断提示`
+    !big.hung && Buffer.byteLength(big.stdout) === 8 * 1024 * 1024 && big.stdoutTruncated === true,
+    big.hung ? "*** 卡死 ***" : `${Buffer.byteLength(big.stdout)}B，带截断标记`
   );
-  // 无限输出：靠超时收口
-  const inf = await run("yes hello", { timeoutMs: 2000 });
-  check(
-    "yes hello 无限输出按超时收口",
-    !inf.hung,
-    inf.hung ? "*** 卡死 ***" : `exit=${inf.exitCode} ${inf.durationMs}ms`
-  );
+  const timeout = await run("sleep 2", { timeoutMs: 100 });
+  check("超时返回 124", !timeout.hung && timeout.exitCode === 124 && !timeout.fallback, `exit=${timeout.exitCode}`);
+  const expired = await run("echo must-not-run", { expiresAt: Date.now() - 100 });
+  check("过期请求在执行前被拒绝", expired.executionState === "not_started" && expired.stdout === "", expired.reason);
+  const limited = await run("printf '中中'; printf 'abc' >&2", { outputLimit: 4 });
+  check("UTF-8 截断与双流共用预算", limited.stdout === "中" && limited.stderr === "a" && limited.stdoutTruncated && limited.stderrTruncated);
 
   console.log("\n== 5. 大输出之后 daemon 仍然可用 ==");
   for (const cmd of ["echo alive", "pwd", "seq 1 3"]) {
