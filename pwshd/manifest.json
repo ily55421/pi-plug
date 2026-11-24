@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "id": "local.pwshd",
   "name": "常驻 PowerShell",
-  "version": "0.1.0",
-  "description": "给 Agent 的 PowerShell 快速通道：常驻一个 pwsh 进程，每条命令在独立 Runspace 中执行，省掉每次约 250ms 的 pwsh 冷启动，轻量命令单次耗时从约 440ms 降到约 60ms。语义与内置 Bash 对齐：同样接受 PowerShell 语法、同样的工作目录（工作区根）、退出码按 $? 判定。状态隔离，变量与函数不跨命令残留。任何 daemon 故障都会返回 fallback 让模型改回内置 Bash；不联网、不读项目文件、不碰凭据。",
+  "version": "0.1.1",
+  "description": "短 PowerShell 命令的常驻通道。每条命令使用新 Runspace，但共享进程环境；工作目录必须可解析，已提交但结果未知的命令不会重放。",
   "i18n": {
     "en": {
       "name": "Resident PowerShell",
-      "description": "A PowerShell fast lane for the agent: one resident pwsh process, with each command executed in its own Runspace, removing the ~250ms pwsh cold start so short commands drop from about 440ms to about 60ms. Semantics match the built-in Bash tool: same PowerShell syntax, same working directory (the workspace root), and $?-based exit codes. State is isolated, so variables and functions never leak between commands. Any daemon failure returns fallback so the model switches back to the built-in Bash tool. No network, no project file reads, no credentials.",
-      "safetyNotes": "The plugin spawns only its own bundled server.ps1 through the local pwsh executable, and speaks a line-delimited base64+JSON protocol over stdio. Each command runs in a fresh Runspace, so no state carries over between commands. The registered tool takes a PowerShell command string, an optional working directory and an optional timeout; output is capped at 8MB and truncated with a note rather than hanging. The daemon is a child process of the app with no pipe or port reachable from outside."
+      "description": "A resident daemon for short PowerShell commands. Commands use fresh Runspaces but share process-wide state. Unresolved working directories are rejected and submitted commands are never replayed.",
+      "safetyNotes": "The daemon runs the bundled server.ps1 and communicates over stdio. Runspaces do not isolate environment writes or other process-wide state. Captured stdout and stderr share an 8 MiB UTF-8 budget per tool call."
     },
     "zh-CN": {
       "name": "常驻 PowerShell",
-      "description": "给 Agent 的 PowerShell 快速通道：常驻一个 pwsh 进程，每条命令在独立 Runspace 中执行，省掉每次约 250ms 的 pwsh 冷启动，轻量命令单次耗时从约 440ms 降到约 60ms。语义与内置 Bash 对齐：同样接受 PowerShell 语法、同样的工作目录（工作区根）、退出码按 $? 判定。状态隔离，变量与函数不跨命令残留。任何 daemon 故障都会返回 fallback 让模型改回内置 Bash；不联网、不读项目文件、不碰凭据。",
-      "safetyNotes": "插件只通过本机 pwsh 执行自带的 server.ps1，通过 stdio 上的 base64+JSON 逐行协议通信。每条命令在全新 Runspace 中执行，命令之间不残留任何状态。注册的工具接收一条 PowerShell 命令、可选工作目录与可选超时；输出上限 8MB，超出会截断并标注而不是卡死。daemon 是 app 的子进程，外部没有管道或端口可连。"
+      "description": "短 PowerShell 命令的常驻通道。每条命令使用新 Runspace，但共享进程环境；工作目录必须可解析，已提交但结果未知的命令不会重放。",
+      "safetyNotes": "daemon 运行随附的 server.ps1，通过 stdio 通信。Runspace 不隔离环境变量写入或其他进程级状态。每次工具调用捕获的 stdout 和 stderr 共享 8 MiB UTF-8 预算。"
     }
   },
   "author": "local",
@@ -24,25 +24,42 @@
     "agentTools": [
       {
         "name": "pwsh_run",
-        "description": "Run a PowerShell command in a resident daemon instead of spawning pwsh each time. This is the fast lane for PowerShell: it costs about 60ms instead of the ~440ms a fresh `pwsh -NoProfile -NonInteractive -Command` start takes, so it is roughly 7-10x faster for short commands. It is a drop-in replacement for the Bash tool on this Windows host: same PowerShell syntax, same exit-code semantics ($? based, matching `pwsh -Command`), same working directory (the workspace root). Each command runs in a fresh Runspace, so variables/functions do NOT leak between calls. Use it for Get-ChildItem, Select-Object, Where-Object, ForEach-Object, Get-Content, Test-Path, Get-Item, $env: reads, and ordinary native commands (git/node/cmd). Use the Bash tool instead for commands whose exit code must be exactly propagated (this tool maps `exit N` to 1), long builds and test suites, and anything interactive. If the result has fallback=true, do NOT retry here: call the Bash tool instead.",
+        "description": "Run short PowerShell commands in a resident daemon. Use Bash for environment writes, process-wide state changes, long or interactive jobs, and exact exit codes. A fresh Runspace isolates variables/functions, not the process. Batches run in order by default without short-circuiting; parallel batches are for independent commands. Check each result's status: fallback=true means it did not start; unknown means it may have run, so do not replay it automatically.",
         "risk": "medium",
         "schema": {
           "type": "object",
           "properties": {
             "command": {
               "type": "string",
-              "description": "The PowerShell command to run, e.g. 'Get-ChildItem -File | Select-Object -First 5'. Same syntax as the Bash tool."
+              "description": "One short PowerShell command. Provide command or commands."
+            },
+            "commands": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 20,
+              "items": { "type": "string" },
+              "description": "PowerShell commands (up to 20). Takes precedence over command. Results are returned in input order."
+            },
+            "parallel": {
+              "type": "boolean",
+              "description": "For commands[] only. Defaults to false; true runs up to four independent commands concurrently."
+            },
+            "batchTimeoutMs": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 90000,
+              "description": "For commands[] only. Total time budget including setup and waiting, in milliseconds (default 90000). Unsubmitted commands are marked skipped."
             },
             "cwd": {
               "type": "string",
-              "description": "Optional working directory. Defaults to the current workspace root."
+              "description": "Defaults to the workspace root. Relative paths are resolved against that root; otherwise provide an absolute filesystem path."
             },
             "timeoutMs": {
               "type": "number",
-              "description": "Optional timeout in milliseconds (1000-600000). Defaults to 60000."
+              "description": "Per-command execution timeout in milliseconds (1000–600000, default 60000), subject to host and batch deadlines."
             }
           },
-          "required": ["command"]
+          "required": []
         }
       }
     ],

@@ -1,22 +1,14 @@
-# pwshd：常驻 PowerShell 服务器（Runspace 并发池）
-#
-# 协议：stdin 每行 = base64(UTF8 JSON { id, command, cwd, timeoutMs })；stdout 每行 = 一行 JSON 结果。
-# 设计要点：
-#   1. 主线程只负责读 stdin / 入队；N 个 worker runspace 从 BlockingCollection 取请求并行执行，
-#      消灭单线程循环的排队（并发工具调用不再互相等待）。
-#   2. 每条命令仍新建独立 Runspace —— 状态隔离，等价于"每次新开 pwsh -NoProfile"，与内置 Bash 一致。
-#      池化的是 worker（执行线程），不是被复用的 Runspace，所以变量/函数绝不跨命令残留。
-#   3. cwd、输出格式化、错误分流全部在命令 Runspace 内部完成，绝不直接写宿主 stdout（否则破坏 JSON 协议）。
-#   4. 退出码对齐宿主：用 $? 判定（True→0，False→1），与 `pwsh -Command` 一致。
-#      显式 `exit N` 会终止 Runspace 管道且不透传 N，此时以 explicitExit 标记告知调用方。
-#   5. 每命令超时在 worker 内用 BeginInvoke + WaitOne 收口（exitCode=124），只停该命令的 Runspace，
-#      daemon 与其余 worker 不受影响；插件侧杀进程仅作最后兜底。
-#   6. 响应经 [Console]::Out（SyncTextWriter）单行写出，多 worker 并发写也不会拆行。
+# pwshd：stdin 每行 base64(UTF-8 JSON)，stdout 每行一个 JSON 响应。
+# 每条命令新建 Runspace；变量和函数独立，但进程级状态（例如 $env:）仍然共享。
 param([int]$Workers = 4)
 
 $ErrorActionPreference = "Continue"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+# 协议保留自己的同步 writer。命令直接调用 Console.WriteLine 不属于支持的输出流。
+$protocolOut = [Console]::Out
+[Console]::SetOut([System.IO.TextWriter]::Null)
 
 # 协议读取用私有 StreamReader，持有原始 stdin 管道句柄（在换句柄之前打开）。
 $stdinReader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
@@ -38,18 +30,81 @@ try {
 if ($Workers -lt 1) { $Workers = 1 }
 if ($Workers -gt 16) { $Workers = 16 }
 
-$SEP_O = '##PWSHD_O##'
-$SEP_E = '##PWSHD_E##'
-$SEP_X = '##PWSHD_X##'
-$SEP_L = '##PWSHD_L##'
-$SEP_END = '##PWSHD_END##'
-$DefaultTimeout = 60000
+# 在追加到 StringBuilder 前共享计量 stdout/stderr 的 UTF-8 字节数。
+# 按 Unicode 码点截断，不拆代理对，也不为超限文本分配整个 UTF-8 数组。
+Add-Type -ErrorAction Stop -TypeDefinition @"
+using System;
+using System.Globalization;
+using System.Management.Automation.Host;
+using System.Text;
 
-$queue = New-Object 'System.Collections.Concurrent.BlockingCollection[object]'
+namespace Pwshd {
+    // 由 PowerShell 引擎通知 exit；不把 break/continue 等其他提前结束误报为 exit。
+    public sealed class CommandHost : PSHost {
+        public bool Exited { get; private set; }
+        public override Guid InstanceId { get; } = Guid.NewGuid();
+        public override string Name { get { return "pwshd"; } }
+        public override Version Version { get { return new Version(1, 0); } }
+        public override PSHostUserInterface UI { get { return null; } }
+        public override CultureInfo CurrentCulture { get { return CultureInfo.CurrentCulture; } }
+        public override CultureInfo CurrentUICulture { get { return CultureInfo.CurrentUICulture; } }
+        public override void SetShouldExit(int code) { Exited = true; }
+        public override void EnterNestedPrompt() { throw new NotSupportedException(); }
+        public override void ExitNestedPrompt() { throw new NotSupportedException(); }
+        public override void NotifyBeginApplication() { }
+        public override void NotifyEndApplication() { }
+    }
 
-# worker 循环：取请求 → 新建 Runspace 执行 → 打包响应单行写出。
-# 单引号 here-string 内的变量（$queue / $SEP_* / $DefaultTimeout）由 SessionStateProxy 注入，
-# 在 worker runspace 运行时求值；命令脚本里的 `$ 转义保持与原实现一致。
+    public sealed class Capture {
+        private readonly StringBuilder stdout = new StringBuilder();
+        private readonly StringBuilder stderr = new StringBuilder();
+        private static readonly char[] trailing = new[] { '\r', '\n' };
+        private int remaining;
+        private bool stdoutLine;
+        private bool stderrLine;
+        public Capture(int limit) { remaining = limit; }
+        public bool StdoutTruncated { get; private set; }
+        public bool StderrTruncated { get; private set; }
+        public bool Started { get; set; }
+        public bool Completed { get; set; }
+        public bool Success { get; set; } = true;
+        public string SkipReason { get; set; }
+        public bool CanWriteStdout { get { return remaining > 0 && !StdoutTruncated; } }
+        public void MarkStdoutTruncated() { StdoutTruncated = true; }
+        public string Stdout { get { return stdout.ToString().TrimEnd(trailing); } }
+        public string Stderr { get { return stderr.ToString().TrimEnd(trailing); } }
+
+        private bool Append(StringBuilder dest, string text) {
+            int i = 0;
+            while (i < text.Length && remaining > 0) {
+                char c = text[i];
+                bool pair = char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]);
+                int bytes = pair ? 4 : c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
+                if (bytes > remaining) break;
+                remaining -= bytes;
+                i += pair ? 2 : 1;
+            }
+            if (i > 0) dest.Append(text, 0, i);
+            return i < text.Length;
+        }
+
+        public void Write(string text, bool error) {
+            // 延迟插入行分隔符；末尾换行不返回，也不占用另一条流的预算。
+            if (error && !StderrTruncated) {
+                StderrTruncated = (stderrLine && Append(stderr, Environment.NewLine)) || Append(stderr, text);
+                stderrLine = true;
+            } else if (!error && !StdoutTruncated) {
+                StdoutTruncated = (stdoutLine && Append(stdout, Environment.NewLine)) || Append(stdout, text);
+                stdoutLine = true;
+            }
+        }
+    }
+}
+"@
+
+$queue = [System.Collections.Concurrent.BlockingCollection[object]]::new()
+
+# 每条命令边运行边写入有界收集器，不把原始 PSObject 或格式化结果汇成一个无界数组。
 $workerScript = @'
 $ErrorActionPreference = "Continue"
 while ($true) {
@@ -57,56 +112,75 @@ while ($true) {
     if ($req.shutdown) { break }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $id = [int]$req.id
-    $pack = ''
-    $errMsg = ''
+    $id = [long]$req.id
+    $limit = if ($null -eq $req.outputLimitBytes) { 8MB } else { [Math]::Clamp([int]$req.outputLimitBytes, 0, 8MB) }
+    $capture = [Pwshd.Capture]::new($limit)
+    $status = 'not_started'
+    $reason = $null
+    $exitCode = $null
+    $explicitExit = $false
     $timedOut = $false
+    $errMsg = $null
     $ps = $null
     $rs = $null
-    $timeoutMs = $DefaultTimeout
+    $timeoutMs = if ($req.timeoutMs -gt 0) { [int]$req.timeoutMs } else { 60000 }
 
     try {
-        $code = [string]$req.command
         $cwd = [string]$req.cwd
-        if ($req.timeoutMs -and [int]$req.timeoutMs -gt 0) { $timeoutMs = [int]$req.timeoutMs }
-
-        # 切目录放在 Runspace 内部：用 SessionStateProxy 会在宿主 stdout 上泄漏一行路径
-        $loc = if ($cwd) {
-            "Set-Location -LiteralPath '" + ($cwd -replace "'", "''") + "' -ErrorAction Stop | Out-Null"
-        } else { "" }
-
-        # 组装在 Runspace 内执行的脚本：全部结果打包成一个字符串返回，不写 Console
-        $sb = New-Object System.Text.StringBuilder
-        [void]$sb.AppendLine("`$ProgressPreference = 'SilentlyContinue'")
-        [void]$sb.AppendLine("`$PSModuleAutoLoadingPreference = 'All'")
-        if ($loc) { [void]$sb.AppendLine($loc) }
-        [void]$sb.AppendLine("`$___errs = [System.Collections.Generic.List[object]]::new()")
-        [void]$sb.AppendLine("`$___ok = `$true")
-        [void]$sb.AppendLine("`$___prog = & {")
-        [void]$sb.AppendLine($code)
-        # 必须在用户代码之后、任何后续管道之前取 $?，否则失败信号会被 ForEach-Object 吃掉
-        [void]$sb.AppendLine("  `$script:___ok = `$?")
-        [void]$sb.AppendLine("} 2>&1")
-        [void]$sb.AppendLine("`$___le = `$LASTEXITCODE")
-        [void]$sb.AppendLine("`$___text = ((`$___prog | ForEach-Object { if (`$_ -is [System.Management.Automation.ErrorRecord]) { `$___errs.Add(`$_) } else { `$_ } }) | Out-String -Width 300)")
-        [void]$sb.AppendLine("`$___etext = ((`$___errs | ForEach-Object { [string]`$_ }) -join [Environment]::NewLine)")
-        [void]$sb.AppendLine("'" + $SEP_O + "' + `$___text + '" + $SEP_E + "' + `$___etext + '" + $SEP_X + "' + [string]`$___ok + '" + $SEP_L + "' + [string]`$___le + '" + $SEP_END + "'")
-        $wrapped = $sb.ToString()
-
-        $ps = [powershell]::Create()
-        $rs = [runspacefactory]::CreateRunspace()
+        if (-not [IO.Path]::IsPathFullyQualified($cwd)) {
+            throw '必须提供绝对文件系统工作目录'
+        }
+        $commandHost = [Pwshd.CommandHost]::new()
+        $rs = [runspacefactory]::CreateRunspace($commandHost)
         $rs.Open()
+        $rs.SessionStateProxy.SetVariable('__pwshdCapture', $capture)
+        $rs.SessionStateProxy.SetVariable('__pwshdCwd', $cwd)
+        $rs.SessionStateProxy.SetVariable('__pwshdDeadline', [long]$req.deadlineMs)
+        $rs.SessionStateProxy.SetVariable('__pwshdBatchDeadline', [long]$req.batchDeadlineMs)
+        $ps = [powershell]::Create()
         $ps.Runspace = $rs
-        [void]$ps.AddScript($wrapped)
-        $async = $ps.BeginInvoke()
-        if (-not $async.AsyncWaitHandle.WaitOne($timeoutMs)) {
-            $timedOut = $true
-            try { $ps.Stop() } catch { }
-            # 给 Stop 一点时间收口，避免 Dispose 撞上仍在跑的管道
-            try { $async.AsyncWaitHandle.WaitOne(2000) | Out-Null } catch { }
+        # 在命令作用域尾部立即读取 $?；外层再单独记录是否正常返回。
+        # 普通 return 不经过内层尾部，但外层仍能收尾；exit 由 CommandHost 单独识别。
+        $prefix = @"
+`$ProgressPreference = 'SilentlyContinue'
+try { Set-Location -LiteralPath `$__pwshdCwd -ErrorAction Stop }
+catch { `$__pwshdCapture.SkipReason = 'cwd_invalid'; throw }
+`$__pwshdNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+if (`$__pwshdDeadline -gt 0 -and `$__pwshdNow -ge `$__pwshdDeadline) {
+    `$__pwshdCapture.SkipReason = if (`$__pwshdBatchDeadline -gt 0 -and `$__pwshdNow -ge `$__pwshdBatchDeadline) { 'batch_timeout' } else { 'request_timeout' }
+    return
+}
+`$__pwshdCapture.Started = `$true
+& {
+"@
+        $suffix = @"
+    `$__pwshdCapture.Success = `$?
+} 2>&1 3>`$null 4>`$null 5>`$null 6>`$null | ForEach-Object {
+    if (`$_ -is [System.Management.Automation.ErrorRecord]) {
+        if (-not `$__pwshdCapture.StderrTruncated) { `$__pwshdCapture.Write([string]`$_, `$true) }
+    } elseif (`$__pwshdCapture.CanWriteStdout) { `$_ }
+    else { `$__pwshdCapture.MarkStdoutTruncated() }
+} | Out-String -Stream -Width 300 | ForEach-Object {
+    `$__pwshdCapture.Write([string]`$_, `$false)
+}
+`$__pwshdCapture.Completed = `$true
+"@
+        [void]$ps.AddScript($prefix + "`n" + [string]$req.command + "`n" + $suffix)
+        # 批量截止同时覆盖服务端可能的排队时间，不让排队命令在截止后开始。
+        if ($req.batchDeadlineMs -gt 0) {
+            $timeoutMs = [int][Math]::Min($timeoutMs, [Math]::Max(0, [long]$req.batchDeadlineMs - [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()))
+        }
+        if ($timeoutMs -eq 0) {
+            $capture.SkipReason = 'batch_timeout'
         } else {
-            $o = $ps.EndInvoke($async)
-            $pack = (($o | ForEach-Object { [string]$_ }) -join '')
+            $async = $ps.BeginInvoke()
+            if (-not $async.AsyncWaitHandle.WaitOne($timeoutMs)) {
+                $timedOut = $true
+                try { $ps.Stop() } catch { }
+            } else {
+                try { [void]$ps.EndInvoke($async) }
+                catch { $errMsg = [string]$_.Exception.InnerException; if (-not $errMsg) { $errMsg = [string]$_ } }
+            }
         }
     } catch {
         $errMsg = [string]$_
@@ -115,52 +189,49 @@ while ($true) {
         if ($null -ne $rs) { try { $rs.Dispose() } catch { } }
     }
 
-    $sw.Stop()
-
-    $stdout = ''
-    $stderr = ''
-    $ok = $false
-    $exitCode = 0
-    $explicitExit = $false
-
-    $i1 = $pack.IndexOf($SEP_O)
-    $i2 = $pack.IndexOf($SEP_E)
-    $i3 = $pack.IndexOf($SEP_X)
-    $i4 = $pack.IndexOf($SEP_L)
-    $i5 = $pack.IndexOf($SEP_END)
-
-    if ($i1 -ge 0 -and $i2 -gt $i1 -and $i3 -gt $i2 -and $i4 -gt $i3 -and $i5 -gt $i4) {
-        $stdout = $pack.Substring($i1 + $SEP_O.Length, $i2 - $i1 - $SEP_O.Length)
-        $stderr = $pack.Substring($i2 + $SEP_E.Length, $i3 - $i2 - $SEP_E.Length)
-        $okStr = $pack.Substring($i3 + $SEP_X.Length, $i4 - $i3 - $SEP_X.Length)
-        $ok = ($okStr.Trim() -eq 'True')
-        $exitCode = if ($ok) { 0 } else { 1 }
+    if ($capture.Started) {
+        $status = 'finished'
+        if ($timedOut) {
+            $reason = 'command_timeout'
+            $exitCode = 124
+            $capture.Write("[pwshd] 命令达到执行时限（${timeoutMs}ms），已停止 Runspace。", $true)
+        } elseif ($errMsg) {
+            $exitCode = 1
+        } elseif ($commandHost.Exited) {
+            $exitCode = 1
+            $explicitExit = $true
+            $capture.Write('[pwshd] 命令执行了 exit；此工具不返回精确退出码。', $true)
+        } elseif (-not $capture.Completed) {
+            $reason = 'pipeline_ended_early'
+            $exitCode = 1
+        } else {
+            $exitCode = if ($capture.Success) { 0 } else { 1 }
+        }
+    } elseif ($capture.SkipReason) {
+        $reason = $capture.SkipReason
     } elseif ($timedOut) {
+        $reason = if ($req.batchDeadlineMs -gt 0 -and [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -ge [long]$req.batchDeadlineMs) { 'batch_timeout' } else { 'request_timeout' }
         $exitCode = 124
-        $stderr = "[pwshd] 命令超时（${timeoutMs}ms），已停止该命令的 Runspace；daemon 与其余 worker 不受影响。"
-    } elseif (-not $errMsg) {
-        # 没有出现收尾标记：脚本被显式 exit 提前终止，退出码无法透传
-        $explicitExit = $true
-        $exitCode = 1
-        $stderr = "[pwshd] 这条命令调用了 exit，Runspace 管道被提前终止，具体退出码无法透传；需要精确退出码时请改用内置 Bash 工具。"
+    } else {
+        $reason = 'command_setup_failed'
     }
-
-    if ($errMsg) {
-        $stderr = if ($stderr) { $stderr + [Environment]::NewLine + $errMsg } else { $errMsg }
-        $exitCode = 1
-    }
+    if ($errMsg) { $capture.Write($errMsg, $true) }
 
     $resp = [ordered]@{
-        id           = $id
-        ok           = ($exitCode -eq 0)
-        exitCode     = $exitCode
-        stdout       = $stdout.TrimEnd("`r", "`n")
-        stderr       = $stderr.TrimEnd("`r", "`n")
-        durationMs   = [math]::Round($sw.Elapsed.TotalMilliseconds, 2)
+        id = $id
+        status = $status
+        reason = $reason
+        ok = ($exitCode -eq 0)
+        exitCode = $exitCode
+        stdout = $capture.Stdout
+        stderr = $capture.Stderr
+        stdoutTruncated = $capture.StdoutTruncated
+        stderrTruncated = $capture.StderrTruncated
+        durationMs = [math]::Round($sw.Elapsed.TotalMilliseconds, 2)
         explicitExit = $explicitExit
     }
-    [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress))
-    [Console]::Out.Flush()
+    $protocolOut.WriteLine(($resp | ConvertTo-Json -Compress))
+    $protocolOut.Flush()
 }
 '@
 
@@ -172,12 +243,7 @@ for ($i = 0; $i -lt $Workers; $i++) {
     $rs = [runspacefactory]::CreateRunspace()
     $rs.Open()
     $rs.SessionStateProxy.SetVariable("queue", $queue)
-    $rs.SessionStateProxy.SetVariable("SEP_O", $SEP_O)
-    $rs.SessionStateProxy.SetVariable("SEP_E", $SEP_E)
-    $rs.SessionStateProxy.SetVariable("SEP_X", $SEP_X)
-    $rs.SessionStateProxy.SetVariable("SEP_L", $SEP_L)
-    $rs.SessionStateProxy.SetVariable("SEP_END", $SEP_END)
-    $rs.SessionStateProxy.SetVariable("DefaultTimeout", $DefaultTimeout)
+    $rs.SessionStateProxy.SetVariable('protocolOut', $protocolOut)
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
     [void]$ps.AddScript($workerScript)
@@ -185,6 +251,9 @@ for ($i = 0; $i -lt $Workers; $i++) {
     $workerRs += $rs
     $workerHandles += $ps.BeginInvoke()
 }
+
+$protocolOut.WriteLine('{"ready":true}')
+$protocolOut.Flush()
 
 # 主线程：只读 stdin / 入队，不执行命令
 while ($null -ne ($line = $stdinReader.ReadLine())) {
@@ -194,16 +263,15 @@ while ($null -ne ($line = $stdinReader.ReadLine())) {
     try {
         $obj = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line)) | ConvertFrom-Json
     } catch {
-        $resp = [ordered]@{ id = 0; ok = $false; exitCode = 2; stdout = ''; stderr = "pwshd: 请求解析失败: $_"; durationMs = 0; explicitExit = $false }
-        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress))
-        [Console]::Out.Flush()
+        $protocolOut.WriteLine('{"id":0,"status":"not_started","reason":"invalid_request"}')
+        $protocolOut.Flush()
         continue
     }
 
     if ($obj.shutdown) {
-        $resp = [ordered]@{ id = [int]$obj.id; ok = $true; exitCode = 0; stdout = ''; stderr = ''; durationMs = 0; explicitExit = $false; shutdown = $true }
-        [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress))
-        [Console]::Out.Flush()
+        $resp = [ordered]@{ id = [long]$obj.id; status = 'finished'; ok = $true; exitCode = 0; stdout = ''; stderr = ''; durationMs = 0; explicitExit = $false; shutdown = $true }
+        $protocolOut.WriteLine(($resp | ConvertTo-Json -Compress))
+        $protocolOut.Flush()
         break
     }
 

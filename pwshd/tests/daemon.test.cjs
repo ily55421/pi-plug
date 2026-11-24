@@ -1,6 +1,6 @@
 "use strict";
 
-// pwshd daemon 层测试：直接驱动 server.ps1，断言与宿主 `pwsh -NoProfile -Command` 一致的语义。
+// 直接驱动 server.ps1：断言受支持的输出、退出、超时及并发行为。
 // 运行：node tests/daemon.test.cjs
 //
 // 重点覆盖原型阶段踩到的坑：
@@ -9,7 +9,6 @@
 //   3. 退出码语义 —— 对齐宿主（用 $? 而非 $LASTEXITCODE）
 //   4. 显式 exit —— 管道提前终止时给出显式标记而不是静默错值
 
-const assert = require("assert");
 const path = require("path");
 const { spawn } = require("child_process");
 const readline = require("readline");
@@ -62,12 +61,18 @@ function run(command, opts = {}) {
         stdout: m.stdout || "",
         stderr: m.stderr || "",
         explicitExit: m.explicitExit === true,
+        status: m.status,
+        reason: m.reason,
+        stdoutTruncated: m.stdoutTruncated === true,
+        stderrTruncated: m.stderrTruncated === true,
         durationMs: m.durationMs,
       });
     });
     const payload = { id, command, cwd };
     if (opts.shutdown) payload.shutdown = true;
     if (opts.timeoutMs) payload.timeoutMs = opts.timeoutMs;
+    if (opts.outputLimitBytes !== undefined) payload.outputLimitBytes = opts.outputLimitBytes;
+    if (opts.batchDeadlineMs !== undefined) payload.deadlineMs = payload.batchDeadlineMs = opts.batchDeadlineMs;
     proc.stdin.write(Buffer.from(JSON.stringify(payload), "utf8").toString("base64") + "\n");
   });
 }
@@ -85,7 +90,7 @@ function check(name, ok, detail) {
 }
 
 (async () => {
-  console.log("== 1. 与宿主一致的退出码语义 ==");
+  console.log("== 1. 常见命令的 $? 退出码 ==");
   // 基线取自 pwsh -NoProfile -NonInteractive -Command 实测
   const EXIT_CASES = [
     ["'ok'", 0],
@@ -111,6 +116,8 @@ function check(name, ok, detail) {
     ["cmd /c echo native", (r) => r.stdout.trim() === "native"],
     ["pwd", (r) => /Path/.test(r.stdout) && r.stdout.includes("----")],
     ["$a=1\n$b=2\n$a+$b", (r) => r.stdout.trim() === "3"],
+    ["return 42", (r) => r.ok && !r.explicitExit && r.stdout.trim() === "42"],
+    ["[Console]::WriteLine('not protocol'); Write-Warning 'ignored'; Write-Host 'ignored'; 'captured'", (r) => r.ok && r.stdout.trim() === "captured"],
   ];
   for (const [cmd, verify] of OUT_CASES) {
     const r = await run(cmd);
@@ -130,6 +137,11 @@ function check(name, ok, detail) {
     errCase.stdout.trim() === "after" && /boom/.test(errCase.stderr),
     `stdout=${JSON.stringify(errCase.stdout.trim())} stderr=${JSON.stringify(errCase.stderr.slice(0, 40))}`
   );
+  const tokens = "##PWSHD_O## ##PWSHD_E## ##PWSHD_X## ##PWSHD_L## ##PWSHD_END##";
+  const markers = await run(`Write-Error '${tokens}'; '${tokens}'`);
+  check("旧协议标记在两条流中都是普通文本", markers.status === "finished" && markers.ok && markers.stdout === tokens && markers.stderr === tokens);
+  const nativeErr = await run(`node -e "console.log('native-out'); console.error('native-err')"`);
+  check("原生程序 stdout/stderr 分流", nativeErr.ok && nativeErr.stdout === "native-out" && nativeErr.stderr === "native-err");
 
   console.log("\n== 4. 状态隔离（每条新 Runspace） ==");
   await run("$leak = 'LEAKED'; $leak");
@@ -140,12 +152,14 @@ function check(name, ok, detail) {
   check("函数不跨命令泄漏", fn2.stdout.trim() === "isolated-fn", JSON.stringify(fn2.stdout.trim()));
 
   console.log("\n== 5. 显式 exit 的处理 ==");
-  const ex = await run("exit 3");
-  check(
-    "exit 被识别并明确告知",
-    !ex.hung && ex.explicitExit === true && /exit/.test(ex.stderr),
-    ex.hung ? "*** 卡死 ***" : `explicitExit=${ex.explicitExit} exit=${ex.exitCode}`
-  );
+  for (const cmd of ["exit 3", "exit 0", "Invoke-Expression 'exit 2'"]) {
+    const ex = await run(cmd);
+    check(`${cmd} 被识别并明确告知`, !ex.hung && ex.explicitExit && ex.exitCode === 1 && /exit/.test(ex.stderr));
+  }
+  const partial = await run("'before-exit'; exit 3");
+  check("显式 exit 保留此前已捕获输出", partial.explicitExit && partial.stdout === "before-exit");
+  const br = await run("break");
+  check("裸 break 不误报为 exit", br.status === "finished" && br.exitCode === 1 && !br.explicitExit && br.reason === "pipeline_ended_early");
 
   console.log("\n== 6. 工作目录 ==");
   const pwd = await run("(Get-Location).Path");
@@ -163,9 +177,11 @@ function check(name, ok, detail) {
   const badCwd = await run("'should-not-run'", { cwd: path.join(CWD, "no-such-dir-xyz") });
   check(
     "无效 cwd 不静默乱跑",
-    !badCwd.hung && badCwd.stdout.trim() !== "should-not-run",
+    !badCwd.hung && badCwd.status === "not_started" && badCwd.reason === "cwd_invalid" && badCwd.stdout === "",
     `exit=${badCwd.exitCode} out=${JSON.stringify(badCwd.stdout.trim().slice(0, 40))}`
   );
+  const relative = await run("'should-not-run'", { cwd: "tests" });
+  check("协议拒绝相对 cwd", relative.status === "not_started" && relative.stdout === "");
 
   console.log("\n== 7. 大输出 ==");
   for (const [cmd, min] of [
@@ -175,6 +191,14 @@ function check(name, ok, detail) {
     const r = await run(cmd, { timeout: 40000 });
     check(cmd.slice(0, 50), !r.hung && r.stdout.length >= min, r.hung ? "*** 卡死 ***" : `${r.stdout.length}B ${r.wallMs}ms`);
   }
+  const quota = await run("'你好'; Write-Error '😀尾'", { outputLimitBytes: 10 });
+  check("stdout/stderr 共享 UTF-8 预算", quota.stdout === "你好" && quota.stderr === "😀" && !quota.stdoutTruncated && quota.stderrTruncated);
+  const unicode = await run("'abcdef😀尾'", { outputLimitBytes: 9 });
+  check("UTF-8 边界不拆 Unicode 字符", unicode.stdout === "abcdef" && unicode.stdoutTruncated);
+  const capped = await run("1..100 | ForEach-Object { 'x' * 100000 }; Write-Error 'omitted'; 'suffix'", { timeoutMs: 30000 });
+  check("8 MiB 默认预算在序列化前限制双流", capped.status === "finished" && capped.stdoutTruncated && capped.stderrTruncated && Buffer.byteLength(capped.stdout + capped.stderr) <= 8 * 1024 * 1024);
+  const zero = await run("Write-Error 'hidden'; 'hidden'", { outputLimitBytes: 0 });
+  check("零预算仍执行并分别标记两条流", zero.ok && zero.stdout === "" && zero.stderr === "" && zero.stdoutTruncated && zero.stderrTruncated);
 
   console.log("\n== 8. 性能 ==");
   const N = 20;
@@ -194,6 +218,10 @@ function check(name, ok, detail) {
   const wall = Date.now() - tc;
   const allOk = concurrent.every((r) => !r.hung && r.stdout.trim() === "done");
   check(`${M} 条并发（各 ${sleepMs}ms）总耗时 < 1500ms`, allOk && wall < 1500, `${wall}ms（串行约 ${M * sleepMs}ms）`);
+  const queued = Array.from({ length: 4 }, () => run("Start-Sleep -Milliseconds 400"));
+  const expired = await run("'must-not-run'", { batchDeadlineMs: Date.now() + 150 });
+  await Promise.all(queued);
+  check("服务端不会启动已在队列中过期的条目", expired.status === "not_started" && expired.reason === "batch_timeout" && expired.stdout === "");
 
   console.log("\n== 10. 每命令超时（worker 自收口，daemon 存活） ==");
   const to = await run("Start-Sleep -Seconds 5; 'late'", { timeoutMs: 1000, timeout: 8000 });
@@ -230,5 +258,6 @@ function check(name, ok, detail) {
   process.exitCode = fail === 0 ? 0 : 1;
 })().catch((e) => {
   console.error("测试异常:", e);
+  proc.kill();
   process.exitCode = 1;
 });
