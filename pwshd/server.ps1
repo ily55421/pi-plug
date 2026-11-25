@@ -99,10 +99,24 @@ namespace Pwshd {
             }
         }
     }
+
+    public sealed class ProtocolWriter {
+        private readonly object gate = new object();
+        private readonly System.IO.TextWriter writer;
+        public ProtocolWriter(System.IO.TextWriter writer) { this.writer = writer; }
+        public void WriteLine(string line) {
+            lock (gate) {
+                writer.WriteLine(line);
+                writer.Flush();
+            }
+        }
+    }
 }
 "@
 
-$queue = [System.Collections.Concurrent.BlockingCollection[object]]::new()
+$protocolOut = [Pwshd.ProtocolWriter]::new($protocolOut)
+$queueCapacity = 64
+$queue = [System.Collections.Concurrent.BlockingCollection[object]]::new($queueCapacity)
 
 # 每条命令边运行边写入有界收集器，不把原始 PSObject 或格式化结果汇成一个无界数组。
 $workerScript = @'
@@ -231,7 +245,6 @@ if (`$__pwshdDeadline -gt 0 -and `$__pwshdNow -ge `$__pwshdDeadline) {
         explicitExit = $explicitExit
     }
     $protocolOut.WriteLine(($resp | ConvertTo-Json -Compress))
-    $protocolOut.Flush()
 }
 '@
 
@@ -253,7 +266,6 @@ for ($i = 0; $i -lt $Workers; $i++) {
 }
 
 $protocolOut.WriteLine('{"ready":true}')
-$protocolOut.Flush()
 
 # 主线程：只读 stdin / 入队，不执行命令
 while ($null -ne ($line = $stdinReader.ReadLine())) {
@@ -264,18 +276,31 @@ while ($null -ne ($line = $stdinReader.ReadLine())) {
         $obj = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line)) | ConvertFrom-Json
     } catch {
         $protocolOut.WriteLine('{"id":0,"status":"not_started","reason":"invalid_request"}')
-        $protocolOut.Flush()
         continue
     }
 
     if ($obj.shutdown) {
         $resp = [ordered]@{ id = [long]$obj.id; status = 'finished'; ok = $true; exitCode = 0; stdout = ''; stderr = ''; durationMs = 0; explicitExit = $false; shutdown = $true }
         $protocolOut.WriteLine(($resp | ConvertTo-Json -Compress))
-        $protocolOut.Flush()
         break
     }
 
-    $queue.Add($obj)
+    if (-not $queue.TryAdd($obj)) {
+        $resp = [ordered]@{
+            id = [long]$obj.id
+            status = 'not_started'
+            reason = 'queue_full'
+            ok = $false
+            exitCode = $null
+            stdout = ''
+            stderr = ''
+            stdoutTruncated = $false
+            stderrTruncated = $false
+            durationMs = 0
+            explicitExit = $false
+        }
+        $protocolOut.WriteLine(($resp | ConvertTo-Json -Compress))
+    }
 }
 
 # 正常 shutdown 或 stdin EOF 都走到这里：通知 worker 退出并收口

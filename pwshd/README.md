@@ -14,7 +14,7 @@
 
 | `status` | 含义 | `fallback` |
 | --- | --- | --- |
-| `not_started` | 启动、定位目录或准备失败；或者 `skipped: true`（取消／截止） | 仅非跳过情形允许回退 |
+| `not_started` | 启动、定位目录、准备失败或有界队列已满（`reason: "queue_full"`）；或者 `skipped: true`（取消／截止） | 仅非跳过情形允许回退 |
 | `finished` | 已收到执行结果。常见命令按最后的 `$?` 映射到 0/1，执行超时为 124 | `false` |
 | `unknown` | 已尝试发送，未确认结果（如 I/O 错误、daemon 崩溃、等待超时或取消） | `false`；先核对状态，不要自动重跑 |
 
@@ -28,7 +28,7 @@
 
 ## 实现与测试
 
-插件通过 stdio 与自身的 `server.ps1` 通信，默认 4 个 worker。Node 仅在 Windows 子进程环境中补必需的 `PATHEXT` 项，缺 `ComSpec` 时从现有本机 `SystemRoot\System32` 补齐；不修改宿主环境。工具描述和 schema 以 `manifest.json` 为准，仅声明原有的 `agent.tool.register` 与 `agent.prompt.inject` 权限。
+插件通过 stdio 与自身的 `server.ps1` 通信，默认 4 个 worker 和 64 项待处理队列。队列已满时不会阻塞协议主线程，立即返回同一请求 id 的 `not_started`/`queue_full` 响应；其他响应不会因拒绝入队而丢失或重排。Node 仅在 Windows 子进程环境中补必需的 `PATHEXT` 项，缺 `ComSpec` 时从现有本机 `SystemRoot\System32` 补齐；不修改宿主环境。工具描述和 schema 以 `manifest.json` 为准，仅声明原有的 `agent.tool.register` 与 `agent.prompt.inject` 权限。
 
 在 `pwshd` 目录，用可用的 PI scratch 配置测试临时目录，再分别运行独立 Node 进程：
 

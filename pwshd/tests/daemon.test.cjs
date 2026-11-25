@@ -49,11 +49,12 @@ function run(command, opts = {}) {
     const start = Date.now();
     const timer = setTimeout(() => {
       pending.delete(id);
-      resolve({ hung: true, wallMs: Date.now() - start });
+      resolve({ hung: true, id, wallMs: Date.now() - start });
     }, opts.timeout || TIMEOUT);
     pending.set(id, (m) => {
       clearTimeout(timer);
       resolve({
+        id: m.id,
         hung: false,
         wallMs: Date.now() - start,
         ok: m.ok,
@@ -238,11 +239,40 @@ function check(name, ok, detail) {
   const isoC = await run("if ($null -eq $leak) { 'isolated' } else { 'LEAKED:'+$leak }");
   check("并发命令变量不泄漏", isoC.stdout.trim() === "isolated", JSON.stringify(isoC.stdout.trim()));
 
-  console.log("\n== 12. 协议完整性（含并发写入） ==");
+  console.log("\n== 12. 并发协议完整性 ==");
+  const integrityCount = 32;
+  const integrity = await Promise.all(Array.from({ length: integrityCount }, (_, i) =>
+    run(`'parallel-${i}-' + ('x' * 20000) + '-end-${i}'`)
+  ));
+  check(
+    "并发响应逐条完整且 id 唯一",
+    integrity.every((r, i) => !r.hung && r.status === "finished" && r.id > 0 && r.stdout === `parallel-${i}-${"x".repeat(20000)}-end-${i}`) &&
+      new Set(integrity.map((r) => r.id)).size === integrityCount,
+    `${integrity.filter((r) => !r.hung).length}/${integrityCount} 条收到完整响应`
+  );
+
+  console.log("\n== 13. 有界队列满时不阻塞且响应不丢失 ==");
+  const held = Array.from({ length: 4 }, (_, i) => run(`Start-Sleep -Milliseconds 1800; 'hold-${i}'`, { timeout: 10000 }));
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const burstCount = 100;
+  const burst = await Promise.all(Array.from({ length: burstCount }, (_, i) => run(`'burst-${i}'`, { timeout: 20000 })));
+  const queueFull = burst.filter((r) => r.reason === "queue_full").length;
+  check(
+    "队列满即时返回 queue_full，其余响应及 id 均完整",
+    queueFull > 0 && burst.every((r, i) => !r.hung && r.id === burst[0].id + i &&
+      ((r.status === "not_started" && r.reason === "queue_full" && r.stdout === "") ||
+        (r.status === "finished" && r.stdout === `burst-${i}`))),
+    `${queueFull} 条拒绝入队，${burstCount - queueFull} 条正常执行`
+  );
+  const heldResults = await Promise.all(held);
+  check("队列饱和期间已入队响应仍全部返回", heldResults.every((r, i) => !r.hung && r.stdout === `hold-${i}`));
+
+  console.log("\n== 14. 协议完整性（包括并发写入） ==");
   check("stdout 无非 JSON 行", protocolNoise.length === 0, `${protocolNoise.length} 行噪声`);
   if (protocolNoise.length) {
     for (const n of protocolNoise.slice(0, 5)) console.log("    " + n);
   }
+
 
   // 优雅关闭
   await run("", { shutdown: true });
