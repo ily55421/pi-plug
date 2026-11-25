@@ -3,15 +3,16 @@ package main
 // coreutils.go：用 Go 原生实现 Windows 上缺失的 POSIX 核心工具。
 // 当 ExecHandler 发现 PATH 里找不到某命令、而我们有原生实现时启用。
 import (
+	"bufio"
 	"context"
 	"fmt"
-	"io"
+	stdIO "io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
+	"unicode"
 
 	"mvdan.cc/sh/v3/interp"
 )
@@ -49,11 +50,11 @@ var coreutils = map[string]shimFunc{
 
 // ---------- 辅助 ----------
 
-func readAllStdin(r io.Reader) []byte {
+func readAllStdin(r stdIO.Reader) []byte {
 	if r == nil {
 		return nil
 	}
-	b, _ := io.ReadAll(r)
+	b, _ := stdIO.ReadAll(r)
 	return b
 }
 
@@ -65,6 +66,57 @@ func splitLines(b []byte) []string {
 		return nil
 	}
 	return strings.Split(s, "\n")
+}
+
+type noopReadCloser struct{ stdIO.Reader }
+
+func (noopReadCloser) Close() error { return nil }
+
+func openInput(sh shimIO, name string) (stdIO.ReadCloser, error) {
+	if name == "-" {
+		return noopReadCloser{Reader: sh.stdin}, nil
+	}
+	return os.Open(sh.resolvePath(name))
+}
+
+func forEachLine(r stdIO.Reader, fn func(string) error) error {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 32<<10), 32<<20)
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if err := fn(line); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func countStream(r stdIO.Reader) ([4]int, error) {
+	var counts [4]int
+	inWord := false
+	reader := bufio.NewReaderSize(r, 64<<10)
+	for {
+		r, size, err := reader.ReadRune()
+		if size > 0 {
+			counts[2] += size
+			counts[3]++
+			if r == '\n' {
+				counts[0]++
+			}
+			if unicode.IsSpace(r) {
+				inWord = false
+			} else if !inWord {
+				counts[1]++
+				inWord = true
+			}
+		}
+		if err == stdIO.EOF {
+			return counts, nil
+		}
+		if err != nil {
+			return counts, err
+		}
+	}
 }
 
 func out(io shimIO, s string) { fmt.Fprint(io.stdout, s) }
@@ -209,14 +261,12 @@ func humanSize(n int64) string {
 
 // ---------- cat ----------
 
-func shimCat(ctx context.Context, args []string, io shimIO) error {
+func shimCat(ctx context.Context, args []string, sh shimIO) error {
 	numbered := false
 	var files []string
 	for _, a := range args {
 		switch {
-		case a == "-n" || a == "--number":
-			numbered = true
-		case a == "-b":
+		case a == "-n" || a == "--number" || a == "-b":
 			numbered = true
 		case !isFlag(a):
 			files = append(files, a)
@@ -226,25 +276,21 @@ func shimCat(ctx context.Context, args []string, io shimIO) error {
 		files = []string{"-"}
 	}
 	lineNo := 1
-	for _, f := range files {
-		var data []byte
-		if f == "-" {
-			data = readAllStdin(io.stdin)
-		} else {
-			b, err := os.ReadFile(io.resolvePath(f))
-			if err != nil {
-				errOut(io, fmt.Sprintf("cat: %s: %v\n", f, err))
-				return exitCode(1)
-			}
-			data = b
+	for _, name := range files {
+		r, err := openInput(sh, name)
+		if err != nil {
+			errOut(sh, fmt.Sprintf("cat: %s: %v\n", name, err))
+			return exitCode(1)
 		}
 		if numbered {
-			for _, l := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-				out(io, fmt.Sprintf("%6d\t%s\n", lineNo, l))
-				lineNo++
-			}
+			err = forEachLine(r, func(line string) error { out(sh, fmt.Sprintf("%6d\t%s\n", lineNo, line)); lineNo++; return nil })
 		} else {
-			out(io, string(data))
+			_, err = stdIO.Copy(sh.stdout, r)
+		}
+		r.Close()
+		if err != nil {
+			errOut(sh, fmt.Sprintf("cat: %s: %v\n", name, err))
+			return exitCode(1)
 		}
 	}
 	return nil
@@ -292,18 +338,23 @@ func shimCp(ctx context.Context, args []string, io shimIO) error {
 }
 
 func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(src)
+	defer in.Close()
+	info, err := in.Stat()
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(dst, data, info.Mode()); err != nil {
+	outFile, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
+	if err != nil {
 		return err
 	}
-	return nil
+	defer outFile.Close()
+	buf := make([]byte, 128<<10)
+	_, err = stdIO.CopyBuffer(outFile, in, buf)
+	return err
 }
 
 func copyDir(src, dst string, io shimIO, force bool) error {
@@ -321,10 +372,8 @@ func copyDir(src, dst string, io shimIO, force bool) error {
 			if err := copyDir(s, d, io, force); err != nil {
 				return err
 			}
-		} else {
-			if err := copyFile(s, d); err != nil {
-				return err
-			}
+		} else if err := copyFile(s, d); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -490,8 +539,6 @@ func shimWc(ctx context.Context, args []string, io shimIO) error {
 		case a == "-c" || a == "--bytes":
 			wantBytes = true
 		case a == "-m" || a == "--chars":
-			// -m 是字符数（按 rune 计），不是字节数。
-			// 原来把 -m 当成 -c，中文会被算成 9 而不是 5，属于静默错误答案。
 			wantChars = true
 		case !isFlag(a):
 			files = append(files, a)
@@ -500,42 +547,47 @@ func shimWc(ctx context.Context, args []string, io shimIO) error {
 	if !wantLines && !wantWords && !wantBytes && !wantChars {
 		wantLines, wantWords, wantBytes = true, true, true
 	}
-	total := [4]int{} // lines, words, bytes, chars
-	report := func(name string, data []byte) {
-		lines := strings.Count(string(data), "\n")
-		words := len(strings.Fields(string(data)))
-		nBytes := len(data)
-		nChars := utf8.RuneCount(data)
-		total[0] += lines
-		total[1] += words
-		total[2] += nBytes
-		total[3] += nChars
+	total := [4]int{}
+	report := func(name string, counts [4]int) {
+		for i := range total {
+			total[i] += counts[i]
+		}
 		parts := []string{}
 		if wantLines {
-			parts = append(parts, strconv.Itoa(lines))
+			parts = append(parts, strconv.Itoa(counts[0]))
 		}
 		if wantWords {
-			parts = append(parts, strconv.Itoa(words))
+			parts = append(parts, strconv.Itoa(counts[1]))
 		}
 		if wantBytes {
-			parts = append(parts, strconv.Itoa(nBytes))
+			parts = append(parts, strconv.Itoa(counts[2]))
 		}
 		if wantChars {
-			parts = append(parts, strconv.Itoa(nChars))
+			parts = append(parts, strconv.Itoa(counts[3]))
 		}
 		out(io, strings.Join(parts, " ")+" "+name+"\n")
 	}
 	if len(files) == 0 {
-		report("", readAllStdin(io.stdin))
-		return nil
-	}
-	for _, f := range files {
-		b, err := os.ReadFile(io.resolvePath(f))
+		counts, err := countStream(io.stdin)
 		if err != nil {
-			errOut(io, fmt.Sprintf("wc: %v\n", err))
 			return exitCode(1)
 		}
-		report(f, b)
+		report("", counts)
+		return nil
+	}
+	for _, name := range files {
+		r, err := openInput(io, name)
+		if err != nil {
+			errOut(io, fmt.Sprintf("wc: %s: %v\n", name, err))
+			return exitCode(1)
+		}
+		counts, readErr := countStream(r)
+		r.Close()
+		if readErr != nil {
+			errOut(io, fmt.Sprintf("wc: %s: %v\n", name, readErr))
+			return exitCode(1)
+		}
+		report(name, counts)
 	}
 	if len(files) > 1 {
 		parts := []string{}
@@ -574,7 +626,6 @@ func shimHead(ctx context.Context, args []string, io shimIO) error {
 				n = v
 			}
 		case isFlag(a) && isAllDigits(a[1:]):
-			// 老式写法 head -3：之前被静默忽略，退化成默认 10 行，属于"不报错但答案错"。
 			if v, err := strconv.Atoi(a[1:]); err == nil {
 				n = v
 			}
@@ -582,29 +633,47 @@ func shimHead(ctx context.Context, args []string, io shimIO) error {
 			files = append(files, a)
 		}
 	}
+	emit := func(r stdIO.Reader) error {
+		count := 0
+		return forEachLine(r, func(line string) error {
+			if count < n {
+				out(io, line+"\n")
+			}
+			count++
+			if count >= n {
+				return errStopLines
+			}
+			return nil
+		})
+	}
 	if len(files) == 0 {
-		lines := splitLines(readAllStdin(io.stdin))
-		for _, l := range firstN(lines, n) {
-			out(io, l+"\n")
+		err := emit(io.stdin)
+		if err != nil && err != errStopLines {
+			return exitCode(1)
 		}
 		return nil
 	}
-	for _, f := range files {
-		b, err := os.ReadFile(io.resolvePath(f))
+	for _, name := range files {
+		r, err := openInput(io, name)
 		if err != nil {
-			errOut(io, fmt.Sprintf("head: %v\n", err))
+			errOut(io, fmt.Sprintf("head: %s: %v\n", name, err))
 			return exitCode(1)
 		}
-		for _, l := range firstN(splitLines(b), n) {
-			out(io, l+"\n")
+		err = emit(r)
+		r.Close()
+		if err != nil && err != errStopLines {
+			errOut(io, fmt.Sprintf("head: %s: %v\n", name, err))
+			return exitCode(1)
 		}
 	}
 	return nil
 }
 
+var errStopLines = fmt.Errorf("stop line scan")
+
 func shimTail(ctx context.Context, args []string, io shimIO) error {
 	n := 10
-	fromStart := false // tail -n +N：从第 N 行开始一直输出到末尾
+	fromStart := false
 	var files []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -632,7 +701,6 @@ func shimTail(ctx context.Context, args []string, io shimIO) error {
 			errOut(io, "tail: -f 跟随模式在快速通道中不支持，请用内置 Bash\n")
 			return exitCode(1)
 		case isFlag(a) && isAllDigits(a[1:]):
-			// 老式写法 tail -3
 			if x, err := strconv.Atoi(a[1:]); err == nil {
 				n = x
 			}
@@ -640,46 +708,64 @@ func shimTail(ctx context.Context, args []string, io shimIO) error {
 			files = append(files, a)
 		}
 	}
-
-	// selectTail 按 tail 语义挑选要输出的行
-	selectTail := func(lines []string) []string {
-		if fromStart {
-			idx := n - 1
-			if idx < 0 {
-				idx = 0
-			}
-			if idx >= len(lines) {
-				return nil
-			}
-			return lines[idx:]
-		}
-		if n <= 0 {
-			return nil
-		}
-		if len(lines) > n {
-			return lines[len(lines)-n:]
-		}
-		return lines
-	}
-	emit := func(lines []string) {
-		for _, l := range selectTail(lines) {
-			out(io, l+"\n")
-		}
-	}
-
 	if len(files) == 0 {
-		emit(splitLines(readAllStdin(io.stdin)))
-		return nil
+		return streamTail(io.stdin, n, fromStart, func(line string) { out(io, line+"\n") })
 	}
-	for _, f := range files {
-		b, err := os.ReadFile(io.resolvePath(f))
+	for _, name := range files {
+		r, err := openInput(io, name)
 		if err != nil {
-			errOut(io, fmt.Sprintf("tail: %v\n", err))
+			errOut(io, fmt.Sprintf("tail: %s: %v\n", name, err))
 			return exitCode(1)
 		}
-		emit(splitLines(b))
+		err = streamTail(r, n, fromStart, func(line string) { out(io, line+"\n") })
+		r.Close()
+		if err != nil {
+			errOut(io, fmt.Sprintf("tail: %s: %v\n", name, err))
+			return exitCode(1)
+		}
 	}
 	return nil
+}
+
+func streamTail(r stdIO.Reader, n int, fromStart bool, emit func(string)) error {
+	lineNo := 0
+	if fromStart {
+		return forEachLine(r, func(line string) error {
+			lineNo++
+			if lineNo >= maxInt(1, n) {
+				emit(line)
+			}
+			return nil
+		})
+	}
+	if n <= 0 {
+		return nil
+	}
+	lines := make([]string, n)
+	count, next := 0, 0
+	err := forEachLine(r, func(line string) error {
+		lines[next] = line
+		next = (next + 1) % n
+		if count < n {
+			count++
+		}
+		return nil
+	})
+	start := 0
+	if count == n {
+		start = next
+	}
+	for i := 0; i < count; i++ {
+		emit(lines[(start+i)%n])
+	}
+	return err
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func firstN(s []string, n int) []string {

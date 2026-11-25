@@ -111,7 +111,7 @@ const SEMANTIC_CASES = [
   // find：glob 的 * ? 与字符类都要正确翻译
   ["find . -name 'main.go' -type f", "main.go", 0],
   ["find . -name 'mai?.go' -type f", "main.go", 0],
-  ["find . -name '*.go' -type f | wc -l", "4", 0],
+  ["find . -name '*.go' -type f | wc -l", "5", 0],
   ["find . -maxdepth 1 -name 'm*' -type f", "main.go", 0],
   // 以前：c++* 让正则直接编译失败；a[!b]* 的排除语义失效
   ["find . -name 'c++*'", "", 0],

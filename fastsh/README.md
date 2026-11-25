@@ -35,10 +35,12 @@ PowerShell 判定在 POSIX 语法树上检查明显的命令和参数特征，�
 
 ```powershell
 Push-Location src
-try { go build -ldflags '-s -w' -o ../bin/fastsh.exe . } finally { Pop-Location }
+try { gofmt -w coreutils.go coreutils2.go coreutils_test.go detect.go main.go; go test ./...; go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o ../bin/fastsh.exe . } finally { Pop-Location }
 node --check main.js
 node tests/daemon.test.cjs
 node tests/plugin.test.cjs
 ```
+
+`coreutils_test.go` 覆盖流式计数、长行、tail 环形缓冲和流式复制。发布前必须用上述固定参数重建 `bin/fastsh.exe`，再运行全部测试，避免随包二进制与 Go 源码漂移。
 
 PI-Desktop 安装清单使用 `PluginCheck` 验证，发布时使用 `PluginPack`。性能测量区分 daemon 耗时、插件往返和宿主端到端；`timings.daemonMs` 为 daemon 内部毫秒计时，`timings.pluginMs` 为该条插件响应耗时，`cwdMs` 为解析工作区耗时。比较并发吞吐应使用整批墙钟，不能直接用单条宿主日志计时相减。
