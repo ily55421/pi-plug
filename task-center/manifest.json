@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "id": "local.task-center",
   "name": "任务中心",
-  "version": "0.1.1",
-  "description": "给 Agent 用的结构化任务清单：注册 todo_write / todo_read 两个工具，让模型在多步任务里显式维护 pending / in_progress / completed / cancelled 状态与优先级；右侧工作面板提供任务中心视图，实时显示进度、当前进行项与剩余步骤。数据只存在插件自己的设置里，不联网、不写工作区。",
+  "version": "0.3.0",
+  "description": "按会话隔离的结构化任务清单，支持计划标识、版本冲突检测和统一进度视图。守卫在执行结束后记录无进展状态，在下一次启动时有界提醒；不会自动续跑或停止模型。",
   "i18n": {
     "en": {
       "name": "Task Center",
-      "description": "A structured task list for the agent: registers the todo_write / todo_read tools so the model keeps pending / in_progress / completed / cancelled status and priority for multi-step work, plus a Task Center view in the right work panel showing progress, the active item and the remaining steps. Data stays in the plugin's own settings; no network, nothing written into the workspace.",
-      "safetyNotes": "The plugin stores the task list in its own plugin settings and never touches project files, the network, the clipboard or credentials. It declares only agent.tool.register, agent.prompt.inject and ui.view. The registered tools accept plain text task descriptions and write them back into plugin settings; they do not execute commands, read files or call any model."
+      "description": "Session-isolated task lists with plan IDs, revision checks and a shared progress snapshot. The guard observes settled runs and delivers bounded reminders on the next start; it does not start or stop the model.",
+      "safetyNotes": "Lists are stored only in this plugin's own settings. The extension reads that settings file and observes lifecycle and tool events. No project files, network, clipboard or credentials are accessed. No model calls or automatic continuation. Legacy unscoped lists are preserved and never silently assigned to a session."
     },
     "zh-CN": {
       "name": "任务中心",
-      "description": "给 Agent 用的结构化任务清单：注册 todo_write / todo_read 两个工具，让模型在多步任务里显式维护 pending / in_progress / completed / cancelled 状态与优先级；右侧工作面板提供任务中心视图，实时显示进度、当前进行项与剩余步骤。数据只存在插件自己的设置里，不联网、不写工作区。",
-      "safetyNotes": "任务清单只保存在本插件自己的设置里，不读取项目文件、不联网、不碰剪贴板与凭据。仅声明 agent.tool.register、agent.prompt.inject、ui.view 三项权限。注册的工具只接收纯文本任务描述并写回插件设置，不执行命令、不读文件、不调用模型。"
+      "description": "按会话隔离的结构化任务清单，支持计划标识、版本冲突检测和统一进度视图。守卫在执行结束后记录无进展状态，在下一次启动时有界提醒；不会自动续跑或停止模型。",
+      "safetyNotes": "清单只保存在本插件设置中；Agent 扩展只读取该设置文件并观察生命周期与工具事件。不读取项目文件，不联网，不碰剪贴板与凭据，不调用模型，不自动续跑。旧版无会话归属的清单保留原样，不会自动分配给任何会话。"
     }
   },
   "author": "local",
@@ -21,81 +21,59 @@
   "categories": ["productivity", "developer-tools"],
   "main": "main.js",
   "contributes": {
-    "views": [
-      {
-        "id": "tasks",
-        "title": {
-          "en": "Tasks",
-          "zh-CN": "任务"
-        },
-        "entry": "renderer/index.html",
-        "order": 15
-      }
-    ],
-    "commands": [
-      {
-        "id": "taskCenter.open",
-        "title": "任务中心：查看任务进度",
-        "keywords": ["todo", "task", "任务", "清单", "进度", "task center"],
-        "category": "Productivity"
-      }
-    ],
+    "agentExtensions": ["extension/index.mjs"],
+    "views": [{ "id": "tasks", "title": { "en": "Tasks", "zh-CN": "任务" }, "entry": "renderer/index.html", "order": 15 }],
+    "commands": [{ "id": "taskCenter.open", "title": "任务中心：查看任务进度", "keywords": ["todo", "task", "任务", "清单", "进度", "task center"], "category": "Productivity" }],
     "agentTools": [
       {
         "name": "todo_write",
-        "description": "Create or update the structured task list for a complex coding session. Use it for multi-step work or an explicit user task list; skip it for single, trivial or purely conversational requests. Send the complete list every time: it replaces the previous one. Keep exactly one task in_progress, mark a task completed the moment it is done, and never mark work completed that you did not verify.",
+        "description": "创建或替换调用会话的完整任务清单；只用于多步工作。最多一项 in_progress，完成前必须验证。更新时携带最近读取或写入返回的 revision 作为 expectedRevision，冲突后先读取再合并。新目标用 newPlan:true；同一目标追加步骤不新建计划。保存失败或读取失败时不能宣称清单已完成。",
         "risk": "low",
         "schema": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "todos": {
-              "type": "array",
-              "description": "The updated todo list, in execution order.",
+              "type": "array", "maxItems": 200,
+              "description": "本会话完整清单，按执行顺序排列。空数组清空清单。",
               "items": {
-                "type": "object",
+                "type": "object", "additionalProperties": false,
                 "properties": {
-                  "content": {
-                    "type": "string",
-                    "description": "Brief description of the task, imperative mood."
-                  },
-                  "status": {
-                    "type": "string",
-                    "enum": ["pending", "in_progress", "completed", "cancelled"],
-                    "description": "Current status of the task."
-                  },
-                  "priority": {
-                    "type": "string",
-                    "enum": ["high", "medium", "low"],
-                    "description": "Priority level of the task."
-                  }
+                  "content": { "type": "string", "minLength": 1, "maxLength": 500, "description": "简洁、可验证的任务描述。" },
+                  "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"] },
+                  "priority": { "type": "string", "enum": ["high", "medium", "low"], "description": "未提供时使用 medium。" }
                 },
                 "required": ["content", "status"]
               }
-            }
+            },
+            "expectedRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "最近读取或写入返回的版本；首次创建可用 0。提供时拒绝过期更新。" },
+            "newPlan": { "type": "boolean", "description": "新工作目标设为 true，生成新的 runId 并重置守卫预算。" }
           },
           "required": ["todos"]
         }
       },
       {
         "name": "todo_read",
-        "description": "Read the current task list snapshot: every task with its status, priority and position, plus counts and the active task. Call it before reporting a long task as finished to confirm nothing is still pending.",
+        "description": "读取调用会话的任务清单、版本和统计；收尾前复查 remainingCount。默认 full 返回一次完整清单，summary 仅返回摘要。ok:false 表示无法确认状态，不能按空清单处理。",
         "risk": "low",
+        "planSafeActions": ["read"],
         "schema": {
-          "type": "object",
-          "properties": {},
-          "required": []
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "action": { "type": "string", "enum": ["read"], "description": "计划模式读取时显式传 read。" },
+            "detail": { "type": "string", "enum": ["full", "summary"], "description": "默认为 full。" }
+          }
         }
       }
     ],
-    "skills": ["skills/todo-recheck.md"]
+    "skills": ["skills/todo-recheck.md"],
+    "settings": [
+      { "key": "guardEnabled", "title": "残留任务提醒", "description": "在执行结束后记录无进展状态，下次启动时提醒；有进展、中止或错误时不累计停滞。不会自动续跑或停止模型。", "type": "boolean", "default": true, "scope": "plugin" },
+      { "key": "maxNudges", "title": "每个计划最多提醒次数", "description": "1-50；只有实际投递的无进展提醒消耗预算。达到上限后发送一次收束提示，并暂停重复提醒。新计划重置。", "type": "number", "default": 10, "scope": "plugin" },
+      { "key": "stallLimit", "title": "连续无进展轮数上限", "description": "1-10；第 N 次无进展结束后准备一次收束提示。有确认进展时清零停滞计数。", "type": "number", "default": 3, "scope": "plugin" }
+    ]
   },
-  "permissions": [
-    "ui.view",
-    "agent.tool.register",
-    "agent.prompt.inject"
-  ],
-  "engines": {
-    "piDesktop": ">=0.9.0"
-  },
+  "permissions": ["ui.view", "agent.tool.register", "agent.prompt.inject", "agent.extension"],
+  "engines": { "piDesktop": ">=0.23.0" },
   "activationEvents": ["onStartup"]
 }

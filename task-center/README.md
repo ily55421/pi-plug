@@ -1,68 +1,142 @@
-# 任务中心（local.pi-todo）
+# 任务中心（local.task-center）
 
-给 Agent 用的结构化任务清单 + 右侧工作面板的进度视图。补上 PI-Desktop 缺的 `todowrite` 能力。
+版本 **0.3.0**，要求 **PI-Desktop 0.23.0 或更新版本**。提供按会话隔离的任务清单、右侧进度视图，以及有界的无进展提醒。
 
-## 它做什么
+## 工具与面板
 
-**两个 Agent 工具**
-
-| 工具 | 作用 |
+| 工具 | 行为 |
 |---|---|
-| `todo_write` | 建/改整份清单。每条含 `content`、`status`（pending / in_progress / completed / cancelled）、`priority`（high / medium / low）。**每次提交完整清单，覆盖上一份。** |
-| `todo_read` | 读当前清单快照：逐条状态、计数、完成度、当前进行项。收尾前用它复查剩余步骤。 |
+| `todo_write` | 替换调用会话的完整清单，返回摘要、`runId` 和 `revision`。最多 200 项，每项描述最多 500 个 UTF-16 码元，最多一项 `in_progress`。 |
+| `todo_read` | 默认返回一次完整清单和统计；`detail:"summary"` 只返回摘要。收尾前检查 `ok` 和 `remainingCount`。 |
+| `todo_guard_status` | Agent 扩展提供的只读状态：当前计划、预算、待投递提醒、读取错误。 |
 
-**一个工作面板视图**（右侧面板 → 任务）：进度条、`已完成/总数 · 百分比`、当前进行项、按状态排序的清单（进行中 → 待办 → 已完成 → 已取消），优先级用颜色区分。
+面板只展示当前可见会话，通过插件只读 `taskCenter.snapshot` 接口获取统一快照。任务按进行中、待办、完成、取消排列；同组保留清单顺序。
 
-**一个技能**（`todo-recheck`）：教 Agent 长任务开工建清单、每步更新、收尾前复查，把"漏做最后一步"这类问题挡在报告之前。
+**进度表示已结束比例**：`(completed + cancelled) / total`，并分别显示完成与取消数量。空清单为 0%。工具和面板使用同一个后端统计函数。
 
-## 安装
+可见时每次请求完成后等待约 3 秒再读取；隐藏时暂停，恢复立即刷新。未变化只返回版本提示，不重建列表。主题优先通过 `appearance:changed` 推送；无订阅接口时每 30 秒回退读取，隐藏时暂停。读取失败会保留上次成功快照并标注过期；无活动会话或会话切换时清空旧内容。任务文本使用 `textContent`，不会解析 HTML。
 
-```
-PluginCheck → PluginPack → 插件页安装 .piplug
-```
+## 建立和更新计划
 
-开发时用「加载开发插件」选目录，保存即热重载。
-
-## 使用
-
-让 Agent 做一个多步任务，例如"重构 X 模块并补测试"，它会自动建清单；面板实时显示进度。也可以直接说"先列个任务清单"。
-
-Agent 侧调用示例：
+工具的会话身份取自宿主执行上下文，模型无需也不能指定其他会话。首次创建示例：
 
 ```json
 {
+  "expectedRevision": 0,
+  "newPlan": true,
   "todos": [
-    { "content": "读现有实现，定位耦合点", "status": "completed", "priority": "high" },
-    { "content": "抽出 X 模块接口", "status": "in_progress", "priority": "high" },
-    { "content": "迁移调用方", "status": "pending", "priority": "medium" },
-    { "content": "补单元测试", "status": "pending", "priority": "medium" }
+    { "content": "定位问题并确认复现", "status": "in_progress", "priority": "high" },
+    { "content": "完成修复并运行回归检查", "status": "pending", "priority": "medium" }
   ]
 }
 ```
 
-## 数据与隐私
+后续更新携带最近读取或写入返回的 `revision` 作为 `expectedRevision`。遇到 `REVISION_CONFLICT`，先读取，再合并后提交；不要直接重试旧清单。为兼容原调用，版本参数可省略，但省略时无法识别逻辑上的过期提交。
 
-- 清单存在**插件自己的设置**里（`todoState` 键），路径在宿主数据目录的插件设置文件下。
-- **不读工作区文件、不联网、不执行命令、不碰剪贴板与凭据。**
-- 权限只声明 `agent.tool.register`、`agent.prompt.inject`、`ui.view`、`notify` 四项，无 `fs.*`、无 `net.*`。
-- 工具只接收纯文本任务描述并写回插件设置；`content` 上限 500 字符，清单上限 200 条。
+- 新目标使用 `newPlan:true`，生成新的 `runId` 并重置守卫预算。
+- 同一目标补充或调整步骤保持原计划。
+- 旧计划全部结束后提交新的未完成任务，也会自动生成新 `runId`。
+- 相同清单重复提交不保存、不增加版本；显式 `newPlan:true` 除外。
+- 所有会话共享设置文件，整个读改写在插件进程内串行，避免跨会话丢失更新。
+- `todos:[]` 清空当前会话清单。
 
-## 设计取舍
+简要复查：
 
-**为什么状态存在插件设置里而不是工作区文件**：方案文档原设想写 `workspace: .pi-todo.json`，但那需要 `fs.write` 高风险权限，并且会在用户项目里留下一个非项目文件。视图页拿到的 `window.pluginBridge` 恰好有固定的 `plugin.getSettings` 通道，插件进程用 `pi.plugin.setSettings` 写、视图轮询读——本机 `local.token-meter` 与官方 `pi.token-insights` 用的就是这个范式，零文件副作用。
-
-**容错而非报错**：模型漏传 `priority` 补 `medium`，状态非法降级为 `pending`；只有 `content` 全空或条数超限才抛错。工具报错会打断模型的执行流，不值得为可推断的字段这么做。多条同时 `in_progress` 只作为 `notes` 提示，不阻断。
-
-## 已知边界
-
-- 插件无法拦截内置工具，也无法感知 turn 结束，所以"连续 N 轮不调用工具就提醒复查"这类机制级防空转做不到——那是宿主钩子的范围。这里用**技能约束 + 面板可见性**双保险替代。
-- 清单是会话级的：换会话后 Agent 需要重新建，但旧清单仍在设置里，可用 `todo_read` 查看。
-
-## 文件
-
+```json
+{ "detail": "summary" }
 ```
-manifest.json          身份、权限、工具 schema、视图与技能声明
-main.js                工具实现、清单规范化与统计（含 __test 导出）
-renderer/index.html    任务视图（轮询 plugin.getSettings 渲染）
-skills/todo-recheck.md 长任务复查技能
+
+计划模式只允许只读工具，以显式 action 调用：
+
+```json
+{ "action": "read", "detail": "full" }
 ```
+
+输入空白、非字符串描述、超限和多项 `in_progress` 会拒绝保存。缺失优先级补 `medium`；直接调用绕过 schema 时，非法状态或优先级会修正并在 `notes` 中说明。读取持久化数据时严格校验，损坏状态不会被悄悄降级。
+
+## 守卫的实际行为
+
+守卫**不会调用模型、自动续跑或停止模型调度**。它在 `before_agent_start` 建立基线，在 `tool_result` 观察可确认的变更，执行稳定结束后的 `agent_settled` 结算；需要提醒时，在下一次启动的系统提示末尾追加一次提示。因此没有下一次启动时，不会凭空发起新一轮。
+
+| 场景 | 规则 |
+|---|---|
+| 有进展 | 不提醒，不消耗提醒额度，清零连续停滞计数。 |
+| 无进展且有剩余任务 | 增加停滞计数，准备下一次启动时的提醒。 |
+| 达到上限 | 准备一次带准确原因的收束提示，投递后暂停重复提醒。 |
+| 用户中止或模型错误 | 不累计停滞，不触发该次提醒。 |
+| 新计划、全部结束、关闭开关 | 清理相应计数与待提醒状态。 |
+| 重复结束事件 | 只结算一次。 |
+| 提示投递前计划或版本变化 | 丢弃过期提示，不消耗投递额度。 |
+
+确认进展的证据：成功 `Edit` / `Write` / `Patch`；其他工具需要结构化结果明确报告 `changed:true` 或非空 `changedFiles`，且没有错误、后台启动或未变化标记；同文案任务从待办/进行中转为完成/取消也算进展。
+
+**退出码为 0 的 Bash 本身不算修改**，只读命令不能重置停滞。删除、改名、重排任务及重复提交清单也不算完成。守卫无法证明任务质量，真实完成仍需要 Agent 验证；纯调查型任务应及时记录已验证步骤。
+
+设置：`guardEnabled` 默认 true；`maxNudges` 为每计划实际提醒上限，默认 10（1–50）；`stallLimit` 为连续无进展结束次数上限，默认 3（1–10），第 N 次即命中。守卫计数保存在 Runner 内存，重载插件或关闭会话会重置。
+
+## 数据、升级和错误
+
+状态保存在插件私有 `settings.json` 的 `todoSessions` 键：
+
+```json
+{
+  "version": 2,
+  "sessions": {
+    "session:<sessionId>": {
+      "runId": "计划标识",
+      "revision": 1,
+      "updatedAt": 1700000000000,
+      "todos": []
+    }
+  }
+}
+```
+
+旧版 `todoState` 保留原样。因为它没有可靠会话归属，不会自动迁移进当前会话；工具与面板通过 `legacyAvailable` 提示旧记录存在。需要继续旧工作时，在目标会话重新明确建立清单。
+
+普通入口通过 `pi.plugin.getDataPath()` 定位私有目录并严格读取设置文件；扩展使用宿主数据根目录读取同一文件。这样可避免宿主 `getSettings()` 将损坏 JSON 回退为默认值时造成误判。保存仍使用宿主设置 API，不读取或写入用户项目文件。
+
+| 错误码 | 含义和处理 |
+|---|---|
+| `SESSION_REQUIRED` | 工具缺少调用会话；不使用全局回退清单。 |
+| `NO_ACTIVE_SESSION` / `SESSION_CHANGED` | 面板无可见会话或读取中切换，稍后重试。 |
+| `STORAGE_READ_FAILED` / `STATE_CORRUPT` | 状态未知；不能当作空清单或已完成。保存会被拒绝，修复数据后重试。 |
+| `STORAGE_WRITE_FAILED` | 保存未确认，先重新读取实际版本。 |
+| `REVISION_CONFLICT` | 旧版本提交，先读取合并。 |
+| `STATE_TOO_LARGE` | 设置超过 8 MiB 边界，拒绝继续扩大；先备份并归档旧会话。 |
+
+权限为 `ui.view`、`agent.tool.register`、`agent.prompt.inject`、`agent.extension`，没有新增权限。不联网，不执行命令，不碰剪贴板或凭据。私有文件没有宿主级跨进程事务；串行队列保护的是本插件进程中的清单写入，手工外部修改设置不属于并发编辑接口。
+
+## 检查与打包
+
+无需安装第三方依赖。测试中临时文件只放 `PI_SCRATCH_DIR`；在其他环境中把该变量设为项目内专用临时目录。
+
+```powershell
+$env:TEMP = $env:PI_SCRATCH_DIR
+$env:TMP = $env:PI_SCRATCH_DIR
+npm --prefix .\task-center test
+npm --prefix .\task-center run check
+```
+
+运行宿主进程 IPC 集成测试时，提供对应版本的插件宿主进程 `.mjs` 路径：
+
+```powershell
+$env:PI_PLUGIN_HOST_ENTRY = Join-Path $env:PI_SCRATCH_DIR 'task-center-host.mjs'
+node --test .\task-center\tests\host.test.mjs
+```
+
+该测试运行真实插件宿主进程，宿主 API 由隔离夹具模拟；不代表运行中应用的权限、真实 Agent 生命周期及窗口事件均已端到端验证。
+
+然后执行 `PluginCheck` 和 `PluginPack`。结构校验通过不等于运行权限已授权。`.piplug` 必须由 `PluginPack` 产生，不使用普通 ZIP 工具。
+
+## 文件职责
+
+| 文件 | 职责 |
+|---|---|
+| `manifest.json` | 身份、权限、唯一工具 schema、视图和设置声明 |
+| `main.js` | 工具、串行保存、版本冲突及只读快照接口 |
+| `state.cjs` / `storage.cjs` | 共享数据校验、统计和私有设置读取 |
+| `extension/core.mjs` / `extension/index.mjs` | 守卫纯逻辑及生命周期接线 |
+| `renderer/index.html` / `renderer/panel.js` | 面板样式和串行刷新 |
+| `tests/` | 状态、守卫、面板与可选宿主 IPC 测试 |
+| `skills/todo-recheck.md` | Agent 清单维护与收尾复查规范 |

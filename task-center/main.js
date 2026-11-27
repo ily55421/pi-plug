@@ -1,286 +1,142 @@
-/*
- * 任务中心 —— 插件进程入口。
- *
- * 职责：给 Agent 两个结构化任务清单工具（todo_write / todo_read），把清单
- * 存进插件自己的设置里，供右侧工作面板视图轮询渲染。
- *
- * 为什么走「设置」这条通道：视图页只拿到 window.pluginBridge，而面板桥没有
- * 任何「读任务清单」的固定通道，plugin.getSettings 是固定通道之一。
- *
- * 本机 local.token-meter 插件用的就是这个范式（视图侧 bridge.invoke("plugin.getSettings")）。
- *
- * 边界：只写自己的插件设置；不读工作区文件、不联网、不执行命令。
- */
-
 "use strict";
 
-/** 插件设置里保存任务清单的键，与 renderer/index.html 保持一致。 */
-const KEY_STATE = "todoState";
+const { randomUUID } = require("node:crypto");
+const state = require("./state.cjs");
+const manifest = require("./manifest.json");
+const { readSettingsFile, MAX_BYTES } = require("./storage.cjs");
+// 不同会话也共享一份设置文件，因此在插件进程内串行进行整个读改写。
+let writes = Promise.resolve();
 
-/** 合法的状态与优先级；与 manifest.json 里工具 schema 的 enum 一一对应。 */
-const STATUSES = ["pending", "in_progress", "completed", "cancelled"];
-const PRIORITIES = ["high", "medium", "low"];
-
-/** 单条任务文本上限，防止模型把整篇文档塞进一条。 */
-const MAX_CONTENT = 500;
-/** 清单条数上限：超过这个数量说明任务粒度太粗，应当拆分。 */
-const MAX_TODOS = 200;
-
-/* ------------------------------------------------------------ 规范化与统计 */
-
-/** 把任意输入压成一行紧凑文本。 */
-function oneLine(value) {
-  return String(value ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
+function cancelled(ctx) {
+  if (ctx?.signal?.aborted) state.fail("ABORTED", "调用已取消，未保存任务清单。");
 }
-
-/**
- * 校验并规范化模型送来的清单。
- *
- * 策略：能修就修（缺 priority 补 medium、状态非法降级为 pending），
- * 只有 content 全空或条数超限才报错——工具报错会打断模型的执行流，
- * 不值得为可推断的字段这么做。
- */
-function normalizeTodos(input) {
-  if (!Array.isArray(input)) {
-    throw new Error("todos must be an array of { content, status, priority } objects");
-  }
-  if (input.length > MAX_TODOS) {
-    throw new Error(`too many tasks (${input.length}); keep the list under ${MAX_TODOS} items`);
-  }
-
-  const todos = [];
-  let dropped = 0;
-
-  for (const raw of input) {
-    if (!raw || typeof raw !== "object") {
-      dropped += 1;
-      continue;
-    }
-    const content = oneLine(raw.content).slice(0, MAX_CONTENT);
-    if (!content) {
-      dropped += 1;
-      continue;
-    }
-    const status = STATUSES.includes(raw.status) ? raw.status : "pending";
-    const priority = PRIORITIES.includes(raw.priority) ? raw.priority : "medium";
-    todos.push({ content, status, priority });
-  }
-
-  if (todos.length === 0 && input.length > 0) {
-    throw new Error("every task needs a non-empty content string");
-  }
-  return { todos, dropped };
+function errorResult(error) {
+  return { ok: false, code: error.code || "TASK_CENTER_ERROR", message: error.message || "任务中心操作失败。" };
 }
-
-/** 把状态分布、当前进行项与剩余项算成模型和视图都能直接用的形状。 */
-function summarize(todos) {
-  const counts = { pending: 0, in_progress: 0, completed: 0, cancelled: 0 };
-  for (const todo of todos) counts[todo.status] += 1;
-
-  const active = todos.filter((todo) => todo.status === "in_progress");
-  const remaining = todos.filter((todo) => todo.status === "pending" || todo.status === "in_progress");
-  const total = todos.length;
-  const finished = counts.completed + counts.cancelled;
-
-  return {
-    counts,
-    active,
-    remaining,
-    total,
-    finished,
-    /** 0-100 的完成度；空清单按 0 处理，避免除零。 */
-    percent: total === 0 ? 0 : Math.round((finished / total) * 100),
-    /** 模型最该先看的那一条：优先取 in_progress，否则取第一个 pending。 */
-    current: active[0] ?? todos.find((todo) => todo.status === "pending") ?? null,
-  };
-}
-
-/* ------------------------------------------------------------------ 存储 */
-
-/** 读回清单；读失败当成空清单，绝不让读异常挡住工具调用。 */
-async function readState() {
-  let settings = null;
+async function settingsOf() {
   try {
-    settings = await pi.plugin.getSettings();
-  } catch {
-    settings = null;
+    if (typeof pi.plugin.getDataPath !== "function") state.fail("HOST_UNSUPPORTED", "宿主缺少插件私有数据路径接口。");
+    const directory = await pi.plugin.getDataPath();
+    if (typeof directory !== "string" || !directory) state.fail("STORAGE_READ_FAILED", "插件私有数据路径不可用。");
+    return await readSettingsFile(directory);
+  } catch (error) {
+    if (["STATE_CORRUPT", "STATE_TOO_LARGE", "HOST_UNSUPPORTED"].includes(error.code)) throw error;
+    state.fail("STORAGE_READ_FAILED", "任务清单读取失败，无法确认是否还有剩余任务。请稍后重试。");
   }
-  const stored = settings && settings[KEY_STATE];
-  const raw = stored && Array.isArray(stored.todos) ? stored.todos : [];
-  const todos = [];
-  for (const item of raw) {
-    if (!item || typeof item !== "object") continue;
-    const content = oneLine(item.content);
-    if (!content) continue;
-    todos.push({
-      content: content.slice(0, MAX_CONTENT),
-      status: STATUSES.includes(item.status) ? item.status : "pending",
-      priority: PRIORITIES.includes(item.priority) ? item.priority : "medium",
+}
+function enqueue(operation) {
+  const result = writes.then(operation);
+  writes = result.catch(() => undefined);
+  return result;
+}
+function compact(snapshot) {
+  const { ok, sessionId, runId, revision, updatedAt, total, counts, finished, percent, remainingCount, current, legacyAvailable } = snapshot;
+  return { ok, sessionId, runId, revision, updatedAt, total, counts, finished, percent, remainingCount, current: current?.content ?? null, legacyAvailable };
+}
+
+async function executeTodoWrite(args, ctx) {
+  try {
+    const sessionId = state.sessionIdOf(ctx);
+    cancelled(ctx);
+    const { todos, notes } = state.normalizeTodos(args?.todos);
+    if (args?.expectedRevision !== undefined && (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision < 0)) {
+      state.fail("INVALID_REVISION", "expectedRevision 必须是非负安全整数。");
+    }
+    if (args?.newPlan !== undefined && typeof args.newPlan !== "boolean") state.fail("INVALID_ARGUMENT", "newPlan 必须是布尔值。");
+    return await enqueue(async () => {
+      cancelled(ctx);
+      const settings = await settingsOf();
+      cancelled(ctx);
+      const previous = state.stateOf(settings, sessionId);
+      if (args.expectedRevision !== undefined && args.expectedRevision !== previous.revision) {
+        return { ok: false, code: "REVISION_CONFLICT", revision: previous.revision, runId: previous.runId, message: "清单已被更新，请先 todo_read，再合并并使用最新 revision 提交。" };
+      }
+      const newPlan = args.newPlan === true || !previous.runId ||
+        (state.summarize(previous.todos).remainingCount === 0 && state.summarize(todos).remainingCount > 0);
+      if (!newPlan && JSON.stringify(previous.todos) === JSON.stringify(todos)) {
+        return { ...compact(state.snapshot(settings, sessionId)), unchanged: true, notes };
+      }
+      if (previous.revision >= Number.MAX_SAFE_INTEGER) state.fail("REVISION_LIMIT", "清单版本已达上限，请导出数据后联系维护者。");
+      const next = {
+        todos, runId: newPlan ? randomUUID() : previous.runId,
+        revision: previous.revision + 1, updatedAt: Date.now(),
+      };
+      const store = state.storeOf(settings);
+      const updated = { version: state.VERSION, sessions: { ...store.sessions, [`session:${sessionId}`]: next } };
+      const defaults = Object.fromEntries(manifest.contributes.settings.map((setting) => [setting.key, setting.default]));
+      if (Buffer.byteLength(JSON.stringify({ ...defaults, ...settings, [state.KEY]: updated }, null, 2), "utf8") > MAX_BYTES) {
+        state.fail("STATE_TOO_LARGE", "全部会话清单超过 8 MiB，未保存。请归档旧会话后重试。");
+      }
+      cancelled(ctx);
+      try { await pi.plugin.setSettings({ [state.KEY]: updated }); }
+      catch { state.fail("STORAGE_WRITE_FAILED", "任务清单保存失败，请读取当前版本后重试。"); }
+      return { ...compact(state.snapshot({ ...settings, [state.KEY]: updated }, sessionId)), notes };
     });
-  }
-  return { todos, updatedAt: stored && stored.updatedAt ? stored.updatedAt : null };
+  } catch (error) { return errorResult(error); }
 }
 
-/** 写回清单。写失败要抛出，让模型知道状态没保存。 */
-async function writeState(todos, source) {
-  const updatedAt = Date.now();
-  await pi.plugin.setSettings({
-    [KEY_STATE]: { todos, updatedAt, source, version: 1 },
-  });
-  return updatedAt;
+async function executeTodoRead(args, ctx) {
+  try {
+    const sessionId = state.sessionIdOf(ctx);
+    cancelled(ctx);
+    if (args?.detail !== undefined && !["summary", "full"].includes(args.detail)) state.fail("INVALID_ARGUMENT", "detail 只能为 summary 或 full。");
+    await writes;
+    const settings = await settingsOf();
+    cancelled(ctx);
+    const snapshot = state.snapshot(settings, sessionId);
+    if (args?.detail === "summary") return compact(snapshot);
+    // 默认返回一次完整清单，不再叠加 remaining 全文和格式化副本。
+    return { ...compact(snapshot), todos: snapshot.todos };
+  } catch (error) { return errorResult(error); }
 }
 
-/* ------------------------------------------------------------------ 工具 */
-
-/** 模型读清单时看到的文本：一行一条，带序号与优先级，便于它精确回填。 */
-function formatForAgent(state) {
-  const { todos, updatedAt } = state;
-  if (todos.length === 0) {
-    return "任务清单为空。开始多步任务前，用 todo_write 先建一份清单。";
-  }
-  const summary = summarize(todos);
-  const lines = todos.map(
-    (todo, index) => `${index + 1}. [${todo.status}] (${todo.priority}) ${todo.content}`,
-  );
-  const header = [
-    `任务清单（共 ${summary.total} 项：待办 ${summary.counts.pending} · 进行中 ${summary.counts.in_progress} · 已完成 ${summary.counts.completed} · 已取消 ${summary.counts.cancelled}）`,
-    `完成度 ${summary.percent}%${summary.current ? `，当前：${summary.current.content}` : ""}`,
-  ];
-  if (updatedAt) header.push(`更新时间：${new Date(updatedAt).toLocaleString()}`);
-  return header.concat(["", ...lines]).join("\n");
+async function activeId() {
+  if (typeof pi.session?.getActive !== "function") state.fail("HOST_UNSUPPORTED", "当前宿主不支持读取当前会话，请升级 PI-Desktop。");
+  const active = await pi.session.getActive();
+  const id = active?.sessionId ?? active?.id;
+  if (typeof id !== "string" || !id) state.fail("NO_ACTIVE_SESSION", "当前没有打开的会话。");
+  return state.sessionIdOf({ sessionId: id });
 }
 
-async function executeTodoWrite(args) {
-  const { todos, dropped } = normalizeTodos(args && args.todos);
-
-  const inProgress = todos.filter((todo) => todo.status === "in_progress").length;
-  const notes = [];
-  if (dropped > 0) notes.push(`${dropped} 条空任务被忽略`);
-  // 不硬性报错：模型可能正在一次批量推进多条，强行打断反而更糟。
-  if (inProgress > 1) notes.push(`有 ${inProgress} 条任务同时处于 in_progress，建议只保留一条`);
-
-  await writeState(todos, "agent");
-  const summary = summarize(todos);
-
-  return {
-    ok: true,
-    total: summary.total,
-    counts: summary.counts,
-    percent: summary.percent,
-    current: summary.current ? summary.current.content : null,
-    remaining: summary.remaining.map((todo) => todo.content),
-    notes,
-    message:
-      summary.total === 0
-        ? "任务清单已清空。"
-        : `任务清单已更新：共 ${summary.total} 项，完成度 ${summary.percent}%。` +
-          (summary.current ? `当前：${summary.current.content}` : ""),
-  };
+async function onPanelInvoke(channel, payload) {
+  try {
+    if (channel !== "taskCenter.snapshot") state.fail("UNKNOWN_CHANNEL", "不支持的任务中心接口。");
+    if (payload !== undefined && !state.record(payload)) state.fail("INVALID_ARGUMENT", "快照参数必须为对象。");
+    const sessionId = await activeId();
+    await writes;
+    const settings = await settingsOf();
+    const result = state.snapshot(settings, sessionId);
+    if (await activeId() !== sessionId) state.fail("SESSION_CHANGED", "会话已切换，正在刷新任务。");
+    if (payload?.knownSessionId === sessionId && payload?.knownRunId === result.runId &&
+        payload?.knownRevision === result.revision) {
+      return { ok: true, unchanged: true, sessionId, runId: result.runId, revision: result.revision };
+    }
+    return result;
+  } catch (error) { return errorResult(error); }
 }
-
-async function executeTodoRead() {
-  const state = await readState();
-  const summary = summarize(state.todos);
-  return {
-    ok: true,
-    total: summary.total,
-    counts: summary.counts,
-    percent: summary.percent,
-    todos: state.todos,
-    remaining: summary.remaining.map((todo) => todo.content),
-    current: summary.current ? summary.current.content : null,
-    updatedAt: state.updatedAt,
-    message: formatForAgent(state),
-  };
-}
-
-/* ---------------------------------------------------------------- 生命周期 */
 
 async function onLoad() {
-  await pi.agent.registerTool({
-    name: "todo_write",
-    description:
-      "Create or update the structured task list for a complex coding session. Use it for multi-step work or an explicit user task list; skip it for single, trivial or purely conversational requests. Send the complete list every time: it replaces the previous one. Keep exactly one task in_progress, mark a task completed the moment it is done, and never mark work completed that you did not verify.",
-    risk: "low",
-    schema: {
-      type: "object",
-      properties: {
-        todos: {
-          type: "array",
-          description: "The updated todo list, in execution order.",
-          items: {
-            type: "object",
-            properties: {
-              content: {
-                type: "string",
-                description: "Brief description of the task, imperative mood.",
-              },
-              status: {
-                type: "string",
-                enum: STATUSES,
-                description: "Current status of the task.",
-              },
-              priority: {
-                type: "string",
-                enum: PRIORITIES,
-                description: "Priority level of the task.",
-              },
-            },
-            required: ["content", "status"],
-          },
-        },
-      },
-      required: ["todos"],
-    },
-    execute: executeTodoWrite,
-  });
-
-  await pi.agent.registerTool({
-    name: "todo_read",
-    description:
-      "Read the current task list snapshot: every task with its status, priority and position, plus counts and the active task. Call it before reporting a long task as finished to confirm nothing is still pending.",
-    risk: "low",
-    schema: { type: "object", properties: {}, required: [] },
-    execute: executeTodoRead,
-  });
-
+  for (const descriptor of manifest.contributes.agentTools) {
+    await pi.agent.registerTool({ ...descriptor, execute: descriptor.name === "todo_write" ? executeTodoWrite : executeTodoRead });
+  }
   await pi.commands.register({
-    id: "taskCenter.open",
-    title: "任务中心：查看任务进度",
-    keywords: ["todo", "task", "任务", "清单", "进度", "task center"],
-    category: "Productivity",
+    ...manifest.contributes.commands[0],
     run: async () => {
-      const state = await readState();
-      const summary = summarize(state.todos);
-      if (summary.total === 0) {
-        await pi.ui.showToast("任务清单为空", "info");
-        return;
-      }
-      // 视图插件没有"打开某个视图"的宿主 API，所以这里给出路径指引，
-      // 与官方 pi.terminal 的同类命令做法一致。
-      await pi.ui.showToast(
-        `任务：${summary.counts.completed}/${summary.total} 已完成（${summary.percent}%）` +
-          (summary.current ? ` · 当前：${summary.current.content}` : "") +
-          " · 打开：右侧面板 → 任务",
-        "info",
-      );
+      try {
+        const sessionId = await activeId();
+        if (typeof pi.ui.revealView === "function") {
+          await pi.ui.revealView({ viewId: "tasks", sessionId });
+        } else {
+          await pi.ui.showToast("打开右侧面板 → 任务，查看当前会话清单。", "info");
+        }
+      } catch (error) { await pi.ui.showToast(error.message, "error"); }
     },
   });
 }
-
 async function onUnload() {
+  await writes;
   await Promise.allSettled([
-    pi.agent.unregisterTool("todo_write"),
-    pi.agent.unregisterTool("todo_read"),
-    pi.commands.unregister("taskCenter.open"),
+    pi.agent.unregisterTool("todo_write"), pi.agent.unregisterTool("todo_read"), pi.commands.unregister("taskCenter.open"),
   ]);
 }
-
-module.exports = {
-  onLoad,
-  onUnload,
-  // 导出纯函数供测试直接断言，不依赖宿主环境。
-  __test: { normalizeTodos, summarize, formatForAgent, oneLine, STATUSES, PRIORITIES },
-};
+module.exports = { onLoad, onUnload, onPanelInvoke, __test: { ...state, executeTodoRead, executeTodoWrite } };

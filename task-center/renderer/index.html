@@ -32,6 +32,7 @@
       }
 
       * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
 
       /*
        * 这是工作面板视图（views），不是独立面板：宿主把 titlebar 高度发布为
@@ -40,7 +41,9 @@
        */
       body {
         margin: 0;
-        min-height: 100vh;
+        height: 100vh;
+        height: 100dvh;
+        min-height: 0;
         padding: var(--pi-plugin-titlebar-height, 0px) 0 0;
         display: flex;
         flex-direction: column;
@@ -74,6 +77,9 @@
         font-size: 12px;
         font-variant-numeric: tabular-nums;
       }
+
+      .detail, .notice { margin-top: 6px; color: var(--muted); font-size: 12px; }
+      .notice { color: var(--danger); overflow-wrap: anywhere; }
 
       .bar {
         margin-top: 8px;
@@ -245,10 +251,12 @@
   <body>
     <div class="head">
       <div class="head-row">
-        <h1>任务中心</h1>
+        <h1 id="title">任务中心</h1>
         <span class="count" id="count">—</span>
       </div>
-      <div class="bar"><i id="progress"></i></div>
+      <div class="bar" id="progressBar" role="progressbar" aria-label="已结束任务" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="progress"></i></div>
+      <div class="detail" id="breakdown" hidden></div>
+      <div class="notice" id="notice" role="status" aria-live="polite">正在加载…</div>
       <div class="current" id="currentRow" hidden>
         <span class="dot"></span>
         <span class="text" id="currentText"></span>
@@ -258,182 +266,20 @@
     <div class="scroll">
       <ul class="list" id="list"></ul>
       <div class="empty" id="empty" hidden>
-        <p>还没有任务清单</p>
-        <p class="hint">让 Agent 开始一个多步任务，它会用 todo_write 建清单</p>
+        <p id="emptyTitle">还没有任务清单</p>
+        <p class="hint" id="emptyHint">让 Agent 开始一个多步任务，它会用 todo_write 建清单</p>
       </div>
     </div>
 
     <div class="foot">
       <span class="legend">
-        <span><i class="p"></i>待办</span>
-        <span><i class="a"></i>进行中</span>
-        <span><i class="d"></i>已完成</span>
+        <span><i class="p"></i><span id="legendPending">待办</span></span>
+        <span><i class="a"></i><span id="legendActive">进行中</span></span>
+        <span><i class="d"></i><span id="legendDone">已完成</span></span>
       </span>
       <span id="updated">—</span>
     </div>
 
-    <script>
-      /*
-       * 视图页没有 `pi` 对象，只有 window.pluginBridge。插件进程把清单写进
-       * 插件设置（todoState），这里轮询 plugin.getSettings 渲染。
-       * 本文件对宿主只读：从不写设置、不发网络请求。
-       *
-       * 所有任务文本一律用 textContent 写入，模型产出的内容不经过 HTML 解析。
-       */
-      (function () {
-        "use strict";
-
-        const bridge = window.pluginBridge || null;
-        const KEY_STATE = "todoState";
-
-        /** 面板可见时 1.5s，隐藏时 6s：面板常常可见但没有焦点。 */
-        const POLL_MS = 1500;
-        const POLL_HIDDEN_MS = 6000;
-        /** 主题变化的复查节奏。工作面板视图收不到 appearance:changed 推送，
-         *  所以只能定期重新问一次宿主。 */
-        const APPEARANCE_POLL_MS = 5000;
-
-        const $ = (id) => document.getElementById(id);
-        const state = {
-          todos: [],
-          updatedAt: null,
-          renderKey: null,
-          timer: null,
-          appearanceTimer: null,
-        };
-
-        const STATUS_ORDER = { in_progress: 0, pending: 1, completed: 2, cancelled: 3 };
-
-        function applyAppearance(appearance) {
-          const base = appearance && appearance.base;
-          const resolved =
-            base === "light" || base === "dark"
-              ? base
-              : window.matchMedia("(prefers-color-scheme: light)").matches
-                ? "light"
-                : "dark";
-          if (document.documentElement.dataset.base !== resolved) {
-            document.documentElement.dataset.base = resolved;
-          }
-        }
-
-        function stamp(ms) {
-          const n = Number(ms);
-          if (!Number.isFinite(n) || n <= 0) return "—";
-          const d = new Date(n);
-          if (Number.isNaN(d.getTime())) return "—";
-          const hh = String(d.getHours()).padStart(2, "0");
-          const mm = String(d.getMinutes()).padStart(2, "0");
-          return d.getMonth() + 1 + "月" + d.getDate() + "日 " + hh + ":" + mm;
-        }
-
-        /** 排序：进行中 → 待办 → 已完成 → 已取消；同组内保持模型给的顺序。 */
-        function ordered(todos) {
-          return todos
-            .map((todo, index) => ({ todo, index }))
-            .sort((a, b) => {
-              const sa = STATUS_ORDER[a.todo.status] ?? 9;
-              const sb = STATUS_ORDER[b.todo.status] ?? 9;
-              if (sa !== sb) return sa - sb;
-              return a.index - b.index;
-            })
-            .map((entry) => entry.todo);
-        }
-
-        function render() {
-          const todos = state.todos;
-          const key = JSON.stringify([todos, state.updatedAt]);
-          if (key === state.renderKey) return;
-          state.renderKey = key;
-
-          const done = todos.filter((t) => t.status === "completed").length;
-          const total = todos.length;
-          const percent = total === 0 ? 0 : Math.round((done / total) * 100);
-          const active = todos.find((t) => t.status === "in_progress") || null;
-
-          $("count").textContent = total === 0 ? "—" : done + " / " + total + " · " + percent + "%";
-          $("progress").style.width = percent + "%";
-          $("updated").textContent = state.updatedAt ? "更新于 " + stamp(state.updatedAt) : "—";
-
-          const currentRow = $("currentRow");
-          if (active) {
-            currentRow.hidden = false;
-            $("currentText").textContent = active.content;
-          } else {
-            currentRow.hidden = true;
-          }
-
-          const list = $("list");
-          list.textContent = "";
-          for (const todo of ordered(todos)) {
-            const li = document.createElement("li");
-            li.className = "item" + (todo.status === "in_progress" ? " active" : "");
-            li.dataset.status = todo.status;
-
-            const glyph = document.createElement("span");
-            glyph.className = "glyph";
-            glyph.textContent = todo.status === "completed" ? "✓" : todo.status === "cancelled" ? "×" : "";
-
-            const content = document.createElement("span");
-            content.className = "content";
-            content.textContent = todo.content;
-
-            const prio = document.createElement("span");
-            prio.className = "prio";
-            prio.dataset.p = todo.priority;
-            prio.textContent = todo.priority === "high" ? "高" : todo.priority === "low" ? "低" : "中";
-
-            li.append(glyph, content, prio);
-            list.append(li);
-          }
-
-          $("empty").hidden = total > 0;
-        }
-
-        async function refresh() {
-          if (!bridge || typeof bridge.invoke !== "function") return;
-          try {
-            const settings = (await bridge.invoke("plugin.getSettings")) || {};
-            const stored = settings[KEY_STATE] || {};
-            state.todos = Array.isArray(stored.todos) ? stored.todos : [];
-            state.updatedAt = stored.updatedAt || null;
-            render();
-          } catch {
-            // 读失败就保持上一帧，下一次轮询重试。
-          }
-        }
-
-        function schedule() {
-          if (state.timer) clearTimeout(state.timer);
-          const delay = document.hidden ? POLL_HIDDEN_MS : POLL_MS;
-          state.timer = setTimeout(async () => {
-            await refresh();
-            schedule();
-          }, delay);
-        }
-
-        /** 视图收不到 appearance:changed 推送，只能定期重新问宿主。 */
-        async function refreshAppearance() {
-          if (!bridge || typeof bridge.invoke !== "function") {
-            applyAppearance(null);
-            return;
-          }
-          try {
-            applyAppearance(await bridge.invoke("app.getAppearance"));
-          } catch {
-            applyAppearance(null);
-          }
-        }
-
-        document.addEventListener("visibilitychange", () => {
-          schedule();
-          void refreshAppearance();
-        });
-
-        void refreshAppearance();
-        state.appearanceTimer = setInterval(refreshAppearance, APPEARANCE_POLL_MS);
-        void refresh().then(schedule);
-      })();
-    </script>
+    <script src="panel.js"></script>
   </body>
 </html>
