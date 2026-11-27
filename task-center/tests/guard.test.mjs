@@ -6,14 +6,14 @@ import guardExtension, { readSettings, sessionKeyOf } from "../extension/index.m
 import { decideResidue, isSuccessfulProgress, madeProgress, normalizeSettings, NOTICE, NOTICE_STOPPED } from "../extension/core.mjs";
 
 const task = (content = "任务", status = "pending") => ({ content, status, priority: "medium" });
-function fixture() {
+function fixture(options = {}) {
   let settings = { todoSessions: { version: 2, sessions: {} } }, failure = null;
   const handlers = new Map(), tools = new Map();
   const pi = {
     on(name, handler) { handlers.set(name, handler); },
     registerTool(tool) { tools.set(tool.name, tool); },
   };
-  guardExtension(pi, { async readSettings() { if (failure) throw failure; return structuredClone(settings); } });
+  const api = guardExtension(pi, { async readSettings() { if (failure) throw failure; return structuredClone(settings); }, archiveInventory: async () => new Map(), ...options });
   const ctx = (id = "A") => ({ sessionManager: { getSessionId: () => id } });
   const emit = (name, event = {}, id = "A") => handlers.get(name)?.({ type: name, ...event }, ctx(id));
   const put = (todos = [task()], { id = "A", runId = "run-A", revision = 1 } = {}) => {
@@ -21,7 +21,8 @@ function fixture() {
   };
   const status = (id = "A") => tools.get("todo_guard_status").execute("call", {}, undefined, undefined, ctx(id));
   return {
-    emit, put, status,
+    emit, put, status, api,
+    guards: api.guards,
     start: (id = "A") => emit("before_agent_start", { systemPrompt: "base" }, id),
     settle: async (id = "A") => { await emit("agent_end", { messages: [] }, id); await emit("agent_settled", {}, id); },
     tool: (toolName, details, isError = false, id = "A") => emit("tool_result", { toolName, details, isError }, id),
@@ -178,4 +179,50 @@ test("同一计划收束后即使恢复进展也不重复收束提醒", async ()
   assert.equal(await f.start(), undefined); await f.settle();
   assert.equal(await f.start(), undefined);
   assert.equal((await f.status()).details.stopped, true);
+});
+
+test("守卫状态按空闲TTL清理，运行中或有待投递提醒的不回收", async () => {
+  let clock = 10_000;
+  const f = fixture({ now: () => clock, guardTtlMs: 1000, maxGuards: 100 });
+  await f.tool("Edit", {}, false, "b");
+  await f.tool("Edit", {}, false, "c");
+  assert.equal(f.guards.size, 2);
+  clock += 5000;
+  await f.tool("Edit", {}, false, "d");
+  assert.deepEqual([...f.guards.keys()], ["d"]);
+  // 运行中的守卫不回收
+  f.put([task()], { id: "p" });
+  await f.start("p");
+  assert.equal(f.guards.get("p").running, true);
+  clock += 5000;
+  await f.tool("Edit", {}, false, "e");
+  assert.equal(f.guards.has("p"), true);
+  // 有待投递提醒的守卫不回收
+  await f.settle("p");
+  assert.equal(f.guards.get("p").pending.action, "nudge");
+  clock += 60_000;
+  await f.tool("Edit", {}, false, "f");
+  assert.equal(f.guards.has("p"), true);
+});
+
+test("守卫数量超过上限时按最久未使用回收，当前会话始终保留", async () => {
+  const f = fixture({ now: () => 0, maxGuards: 3 });
+  for (const id of ["a", "b", "c", "d", "e"]) await f.tool("Edit", {}, false, id);
+  // 上限之外最多多保留一个正在处理的会话。
+  assert.ok(f.guards.size <= 4, `守卫数量应受上限约束，实际 ${f.guards.size}`);
+  assert.equal(f.guards.has("e"), true);
+  assert.equal(f.guards.has("a"), false);
+});
+
+test("守卫状态工具暴露容量与存储指标，读取失败仍然显式报错", async () => {
+  const f = fixture({ now: () => 0 });
+  f.put();
+  const ok = await f.status();
+  assert.equal(ok.details.ok, true);
+  assert.ok(ok.details.capacity && typeof ok.details.capacity.usedBytes === "number");
+  assert.ok(ok.details.storage && typeof ok.details.storage.settingsReads === "number");
+  f.failure = Object.assign(new Error("读取失败"), { code: "STORAGE_READ_FAILED" });
+  const failed = await f.status();
+  assert.equal(failed.isError, true);
+  assert.equal(failed.details.code, "STORAGE_READ_FAILED");
 });

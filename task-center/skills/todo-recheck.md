@@ -25,6 +25,8 @@ description: 执行长任务（5 步以上）或多轮任务收尾前使用。�
 6. 清单按调用会话隔离，不传其他会话身份。新工作目标使用 `newPlan:true`；同一目标追加步骤保持原计划。
 7. 更新携带最近返回的 `revision` 作为 `expectedRevision`。遇到 `REVISION_CONFLICT` 先 `todo_read` 再合并，禁止直接重试旧清单。
 8. 读取或保存 `ok:false` 代表状态未确认，不能把错误当成空清单或已完成。不要为了消除守卫提醒而取消任务。
+9. 容量告警（`capacity.warning`）或 `STATE_TOO_LARGE` 时用 `todo_history` 查看占用；它是只读工具。
+10. 只有用户明确要求永久删除时，才手动运行 `taskCenter.purgeArchived` 命令；清理失败且显示 `purgePending` 时，可再次运行该命令重试。新计划无需清理旧计划，超出保留数量的会话只归档不删除。
 
 ## 收尾复查（关键一步）
 

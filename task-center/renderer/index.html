@@ -16,6 +16,7 @@
         --border: color-mix(in oklab, #ffffff 11%, transparent);
         --accent: #5b9dff;
         --done: #4ec08d;
+        --warn: #d8a24a;
         --danger: #e2685c;
       }
       :root[data-base="light"] {
@@ -28,6 +29,7 @@
         --border: color-mix(in oklab, #1a1c1f 12%, transparent);
         --accent: #2f6fd0;
         --done: #1f8f5f;
+        --warn: #8a6212;
         --danger: #b8443a;
       }
 
@@ -80,6 +82,8 @@
 
       .detail, .notice { margin-top: 6px; color: var(--muted); font-size: 12px; }
       .notice { color: var(--danger); overflow-wrap: anywhere; }
+
+      .notice[data-kind="warn"] { color: var(--warn); }
 
       .bar {
         margin-top: 8px;

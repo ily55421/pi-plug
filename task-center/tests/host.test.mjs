@@ -32,11 +32,13 @@ test("实际宿主进程：加载、会话隔离、快照、损坏数据、取�
           case "agent.registerTool": registered.set(input.name, input); break;
           case "agent.unregisterTool": registered.delete(input); break;
           case "commands.register": case "commands.unregister": case "ui.showToast": break;
-          case "plugin.getDataPath":
-            if (delayed) await new Promise((done) => { release = done; });
-            value = directory; break;
+          case "plugin.getDataPath": value = directory; break;
           case "plugin.getSettings": value = settings; break;
-          case "plugin.setSettings": settings = { ...settings, ...input }; await writeFile(file, JSON.stringify(settings, null, 2)); break;
+          case "plugin.setSettings":
+            // 提交阶段可被暂停：用于验证"提交期间取消"会回滚会话文件。
+            if (delayed) await new Promise((done) => { release = done; });
+            settings = { ...settings, ...input };
+            await writeFile(file, JSON.stringify(settings, null, 2)); break;
           case "session.getActive": value = active ? { id: active } : null; break;
           case "ui.revealView": assert.equal(input.viewId, "tasks"); value = { revealed: true }; break;
           default: throw new Error(`未模拟宿主 API：${message.api}`);
@@ -58,27 +60,36 @@ test("实际宿主进程：加载、会话隔离、快照、损坏数据、取�
   const task = (content) => ({ content, status: "pending", priority: "medium" });
   try {
     await request({ t: "init", pluginId: manifest.id, pluginPath, main: manifest.main, manifest });
-    assert.equal(registered.size, 2);
+    assert.equal(registered.size, 3);
     const first = await tool("todo_write", { todos: [task("A任务")], expectedRevision: 0 });
     assert.equal(first.ok, true);
     await tool("todo_write", { todos: [task("B任务")] }, "B");
     assert.equal((await tool("todo_read", {})).todos[0].content, "A任务");
     active = "B";
-    const panel = await request({ t: "call", method: "panel.invoke", payload: { channel: "taskCenter.snapshot", payload: {} } });
+    // 真实宿主插件进程没有 session.getActive，面板身份由 bridge 的 session.getActive 提供。
+    const panel = await request({ t: "call", method: "panel.invoke", payload: { channel: "taskCenter.snapshot", payload: { sessionId: "B" } } });
     assert.equal(panel.todos[0].content, "B任务");
+    assert.ok(panel.capacity.usedBytes > 0);
+    const anonymous = await request({ t: "call", method: "panel.invoke", payload: { channel: "taskCenter.snapshot", payload: {} } });
+    assert.equal(anonymous.code, "NO_ACTIVE_SESSION");
     const conflict = await tool("todo_write", { todos: [], expectedRevision: 0 }); assert.equal(conflict.code, "REVISION_CONFLICT");
     await writeFile(file, "{broken");
     assert.equal((await tool("todo_read", {})).code, "STATE_CORRUPT");
     assert.equal((await tool("todo_write", { todos: [] })).code, "STATE_CORRUPT");
     assert.equal(await readFile(file, "utf8"), "{broken");
     await writeFile(file, JSON.stringify(settings));
+    // 提交阶段暂停后取消：宿主不会中断在途调用，因此先放行写入，再断言取消回滚。
     delayed = true;
     const cancelId = "cancel-me";
     const inFlight = tool("todo_write", { todos: [task("不应保存")] }, "A", cancelId);
     while (!release) await new Promise((done) => setImmediate(done));
     child.send({ t: "cancel", invocationId: cancelId, reason: "测试用户中止" });
-    const cancelled = await inFlight; assert.equal(cancelled.ok, false);
-    delayed = false; release();
+    delayed = false;
+    release();
+    const cancelled = await inFlight;
+    assert.equal(cancelled.ok, false);
+    assert.equal(cancelled.code, "ABORTED");
+    assert.equal(Object.values(settings.todoSessions.index).find((entry) => entry.id === "A").revision, 1);
     assert.equal((await tool("todo_read", {})).todos[0].content, "A任务");
     await request({ t: "call", method: "command.run", payload: { id: "taskCenter.open" } });
     await request({ t: "call", method: "lifecycle.unload", payload: {} });

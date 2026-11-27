@@ -2,11 +2,15 @@
 
 // 普通插件、Agent 扩展共用状态契约；面板只消费后端生成的快照。
 const KEY = "todoSessions";
-const VERSION = 2;
+// v3：settings.json 只保存轻量索引，每个会话的清单单独成文件；v2 把全部会话内联在同一份设置里。
+const VERSION = 3;
+const LEGACY_VERSION = 2;
 const MAX_TODOS = 200;
 const MAX_CONTENT = 500;
 const STATUSES = ["pending", "in_progress", "completed", "cancelled"];
 const PRIORITIES = ["high", "medium", "low"];
+// 未建立清单的会话统一使用这个只读空状态，调用方不需要构造默认对象。
+const EMPTY_SESSION = Object.freeze({ todos: [], runId: null, revision: 0, updatedAt: null, archived: false });
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const oneLine = (value) => value.replace(/\s+/g, " ").trim();
@@ -59,44 +63,63 @@ function summarize(todos) {
   };
 }
 
-function storeOf(settings) {
-  if (!record(settings)) fail("STATE_CORRUPT", "插件设置格式损坏，不能据此判断任务已完成。");
-  if (!own(settings, KEY)) return { version: VERSION, sessions: {} };
-  const store = settings[KEY];
-  if (!record(store) || store.version !== VERSION || !record(store.sessions)) {
-    fail("STATE_CORRUPT", "会话清单存储格式损坏或版本不受支持，原数据未覆盖。");
+// 严格读取持久化会话：损坏即失败，不静默降级。expected.sessionId 用于核对文件归属。
+function validateSession(value, expected = {}) {
+  if (!record(value)) fail("STATE_CORRUPT", "当前会话清单存储格式损坏，原数据未覆盖。");
+  if (expected.sessionId !== undefined && value.sessionId !== undefined && value.sessionId !== expected.sessionId) {
+    fail("STATE_CORRUPT", "会话清单文件与请求的会话不一致，未读取。");
   }
-  return store;
-}
-
-function stateOf(settings, sessionId) {
-  const store = storeOf(settings);
-  const key = `session:${sessionId}`;
-  if (!own(store.sessions, key)) return { todos: [], runId: null, revision: 0, updatedAt: null };
-  const state = store.sessions[key];
-  if (!record(state) || typeof state.runId !== "string" || !state.runId ||
-      !Number.isSafeInteger(state.revision) || state.revision < 1 ||
-      !Number.isFinite(state.updatedAt) || state.updatedAt <= 0 || !Array.isArray(state.todos)) {
+  if (typeof value.runId !== "string" || !value.runId ||
+      !Number.isSafeInteger(value.revision) || value.revision < 1 ||
+      !Number.isFinite(value.updatedAt) || value.updatedAt <= 0 || !Array.isArray(value.todos)) {
     fail("STATE_CORRUPT", "当前会话清单元数据损坏，原数据未覆盖。");
   }
   let normalized;
-  try { normalized = normalizeTodos(state.todos); }
+  try { normalized = normalizeTodos(value.todos); }
   catch { fail("STATE_CORRUPT", "当前会话任务数据损坏，不能据此判断任务已完成。"); }
   // 存储数据严格读取，不能把损坏状态静默降级为 pending。
-  if (normalized.notes.length || state.todos.some((item, index) =>
+  if (normalized.notes.length || value.todos.some((item, index) =>
     item.status !== normalized.todos[index].status || item.priority !== normalized.todos[index].priority ||
     item.content !== normalized.todos[index].content)) {
     fail("STATE_CORRUPT", "当前会话任务数据不符合存储契约。");
   }
-  return { todos: normalized.todos, runId: state.runId, revision: state.revision, updatedAt: state.updatedAt };
-}
-
-function snapshot(settings, sessionId) {
-  const state = stateOf(settings, sessionId);
   return {
-    ok: true, sessionId, ...state, ...summarize(state.todos),
-    legacyAvailable: record(settings.todoState) && Array.isArray(settings.todoState.todos) && settings.todoState.todos.length > 0,
+    todos: normalized.todos, runId: value.runId, revision: value.revision,
+    updatedAt: value.updatedAt, archived: value.archived === true,
   };
 }
 
-module.exports = { KEY, VERSION, MAX_TODOS, MAX_CONTENT, STATUSES, PRIORITIES, record, oneLine, fail, sessionIdOf, normalizeTodos, summarize, storeOf, stateOf, snapshot };
+// 只校验 v3 索引；内联 v2 数据必须由迁移或只读回退分支处理，不走这里。
+function storeOf(settings) {
+  if (!record(settings)) fail("STATE_CORRUPT", "插件设置格式损坏，不能据此判断任务已完成。");
+  if (!own(settings, KEY)) return { version: VERSION, index: {} };
+  const store = settings[KEY];
+  if (record(store) && store.version === LEGACY_VERSION) {
+    fail("MIGRATION_REQUIRED", "旧版内联会话存储尚未迁移，未读写清单。");
+  }
+  if (!record(store) || store.version !== VERSION || !record(store.index)) {
+    fail("STATE_CORRUPT", "会话清单索引格式损坏或版本不受支持，原数据未覆盖。");
+  }
+  return store;
+}
+
+function legacyAvailable(settings) {
+  return record(settings?.todoState) && Array.isArray(settings.todoState.todos) && settings.todoState.todos.length > 0;
+}
+
+function snapshotOf(session, sessionId, extra = {}) {
+  const base = session ?? EMPTY_SESSION;
+  return {
+    ok: true, sessionId, runId: base.runId, revision: base.revision, updatedAt: base.updatedAt,
+    ...summarize(base.todos), todos: base.todos,
+    archived: base.archived === true,
+    legacyAvailable: extra.legacyAvailable === true,
+    capacity: extra.capacity ?? null,
+  };
+}
+
+module.exports = {
+  KEY, VERSION, LEGACY_VERSION, MAX_TODOS, MAX_CONTENT, STATUSES, PRIORITIES, EMPTY_SESSION,
+  record, oneLine, fail, sessionIdOf, normalizeTodos, summarize, validateSession, storeOf,
+  legacyAvailable, snapshotOf,
+};

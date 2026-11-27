@@ -4,8 +4,12 @@
 
   const bridge = window.pluginBridge;
   const $ = (id) => document.getElementById(id);
-  const POLL_MS = 3000;
+  // 轮询只做兜底：宿主会在回合结束时向面板推送 session:turnEnded，命中后立即刷新。
+  const POLL_ACTIVE_MS = 3000;      // 清单还有未完成项时
+  const POLL_IDLE_MS = 20000;       // 清单已结束或为空时降低频率
+  const BACKOFF_MS = [3000, 6000, 15000, 30000];
   const APPEARANCE_POLL_MS = 30000;
+  const MAX_TODOS = 200;
   const order = { in_progress: 0, pending: 1, completed: 2, cancelled: 3 };
   const words = {
     zh: {
@@ -15,6 +19,7 @@
       legacy: "有旧版任务记录；当前会话还没有任务清单", loading: "正在加载…",
       stale: "数据已过期，显示上次成功读取的内容", failed: "刷新失败，将自动重试",
       bridge: "无法连接宿主：pluginBridge 不可用", high: "高", medium: "中", low: "低",
+      capacityWarn: "会话数据已占用 {p}%，用 todo_history 查看归档；需要时手动运行 taskCenter.purgeArchived 永久清理",
       errors: {
         NO_ACTIVE_SESSION: "当前没有活动会话", SESSION_CHANGED: "会话已切换，正在重新读取",
         STORAGE_READ_FAILED: "任务记录读取失败", STATE_CORRUPT: "任务记录格式异常",
@@ -27,6 +32,7 @@
       legacy: "Legacy tasks exist; this session has no task list yet", loading: "Loading…",
       stale: "Data is stale; showing the last successful snapshot", failed: "Refresh failed; retrying automatically",
       bridge: "Cannot connect to the host: pluginBridge is unavailable", high: "High", medium: "Medium", low: "Low",
+      capacityWarn: "Session data uses {p}%; inspect archives with todo_history; run taskCenter.purgeArchived manually to delete them",
       errors: {
         NO_ACTIVE_SESSION: "No active session", SESSION_CHANGED: "Session changed; refreshing",
         STORAGE_READ_FAILED: "Could not read task data", STATE_CORRUPT: "Invalid task data",
@@ -41,6 +47,7 @@
   let running = false;
   let flightEpoch = 0;
   let pending = false;
+  let failures = 0;
   let timer = null;
   let appearanceTimer = null;
   let appearanceVersion = 0;
@@ -62,9 +69,12 @@
       if (snapshot) message = t.stale + " · " + message;
     } else if (!snapshot) {
       message = t.loading;
+    } else if (snapshot.capacity?.warning) {
+      message = t.capacityWarn.replace("{p}", String(snapshot.capacity.percent));
     }
     notice.textContent = message;
     notice.hidden = !message;
+    notice.dataset.kind = error ? "error" : "warn";
     document.body.dataset.stale = String(Boolean(error && snapshot));
   }
 
@@ -142,6 +152,7 @@
 
   function fail(result) {
     error = result;
+    failures += 1;
     if (result.code === "NO_ACTIVE_SESSION" || result.code === "SESSION_CHANGED") {
       snapshot = null;
       render();
@@ -150,26 +161,65 @@
     }
   }
 
+  // 宿主是边界：即使后端已经生成可信快照，也要拒绝自相矛盾或越界的数据。
   function validSnapshot(value) {
-    return typeof value.sessionId === "string" && (value.runId === null || typeof value.runId === "string")
-      && Number.isInteger(value.revision) && value.revision >= 0
-      && [value.total, value.finished, value.percent, ...Object.keys(order).map((key) => value.counts?.[key])]
-        .every((n) => Number.isFinite(n) && n >= 0)
-      && value.percent <= 100 && Array.isArray(value.todos)
-      && value.todos.every((todo) => todo && typeof todo.content === "string")
-      && (value.current === null || (value.current && typeof value.current.content === "string"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    if (typeof value.sessionId !== "string" || !value.sessionId) return false;
+    if (!(value.runId === null || typeof value.runId === "string")) return false;
+    if (!Number.isInteger(value.revision) || value.revision < 0) return false;
+    const counts = value.counts;
+    if (!counts || typeof counts !== "object") return false;
+    if (!Object.keys(order).every((key) => Number.isInteger(counts[key]) && counts[key] >= 0)) return false;
+    if (![value.total, value.finished, value.percent].every((n) => Number.isFinite(n) && n >= 0)) return false;
+    if (value.percent > 100) return false;
+    if (!Array.isArray(value.todos) || value.todos.length > MAX_TODOS) return false;
+    if (!value.todos.every((todo) => todo && typeof todo.content === "string" &&
+      Object.prototype.hasOwnProperty.call(order, todo.status) &&
+      ["high", "medium", "low"].includes(todo.priority))) return false;
+    if (value.total !== value.todos.length) return false;
+    if (value.finished !== counts.completed + counts.cancelled) return false;
+    if (counts.pending + counts.in_progress + counts.completed + counts.cancelled !== value.total) return false;
+    const percent = value.total ? Math.round(value.finished / value.total * 100) : 0;
+    if (Math.abs(percent - value.percent) > 1) return false;
+    if (value.current !== null) {
+      if (typeof value.current !== "object" || typeof value.current.content !== "string") return false;
+      if (!["in_progress", "pending"].includes(value.current.status)) return false;
+    }
+    if (value.capacity !== undefined && value.capacity !== null) {
+      const capacity = value.capacity;
+      if (typeof capacity !== "object" || Array.isArray(capacity)) return false;
+      if (![capacity.usedBytes, capacity.limitBytes, capacity.percent].every((n) => Number.isFinite(n) && n >= 0)) return false;
+    }
+    return true;
+  }
+
+  // 有未完成项时保持较高频率；已结束或读取失败时退避，避免异常状态下持续读盘。
+  function delayMs() {
+    if (error) return BACKOFF_MS[Math.min(Math.max(failures, 1), BACKOFF_MS.length) - 1];
+    if (!snapshot || (snapshot.remainingCount ?? 1) > 0) return POLL_ACTIVE_MS;
+    return POLL_IDLE_MS;
   }
 
   function schedule() {
     clearTimeout(timer);
     timer = null;
-    if (visible() && available()) timer = setTimeout(refresh, POLL_MS);
+    if (visible() && available()) timer = setTimeout(refresh, delayMs());
+  }
+
+  // 插件进程拿不到宿主的 session.getActive，面板用 bridge 的同名频道提供可见会话身份。
+  async function detectSession() {
+    if (typeof bridge?.invoke !== "function") return undefined;
+    try {
+      const active = await bridge.invoke("session.getActive");
+      const id = active?.sessionId ?? active?.id;
+      return typeof id === "string" && id ? id : null;
+    } catch { return undefined; }
   }
 
   async function refresh() {
     if (!visible() || !available()) return;
     if (running) {
-      // 聚焦复用当前请求；切换/恢复后的请求等待失效请求结束再执行。
+      // Focus and visibility refreshes wait for the current flight instead of overlapping it.
       if (flightEpoch !== epoch) pending = true;
       return;
     }
@@ -178,27 +228,56 @@
     running = true;
     flightEpoch = epoch;
     const requestEpoch = epoch;
+    const sessionId = await detectSession();
+    if (disposed || (!visible() && requestEpoch === epoch)) {
+      // 初始隐藏时不启动快照；已启动的请求若遇到可见性变化则继续发出，并在响应阶段丢弃旧结果。
+      running = false;
+      pending = false;
+      schedule();
+      return;
+    }
+    if (sessionId === null || (typeof sessionId === "string" && snapshot && snapshot.sessionId !== sessionId)) {
+      snapshot = null;
+      error = null;
+      failures = 0;
+      render();
+    }
     const known = snapshot ? {
       knownSessionId: snapshot.sessionId, knownRunId: snapshot.runId, knownRevision: snapshot.revision,
     } : {};
+    const payload = sessionId === null ? { noActiveSession: true }
+      : typeof sessionId === "string" ? { ...known, sessionId } : known;
     try {
-      const result = await bridge.invoke("taskCenter.snapshot", known);
+      const result = await bridge.invoke("taskCenter.snapshot", payload);
       if (!visible() || requestEpoch !== epoch) return;
+      const activeAfterRequest = await detectSession();
+      if (!visible() || requestEpoch !== epoch) return;
+      if (sessionId !== undefined && activeAfterRequest !== undefined && sessionId !== activeAfterRequest) {
+        snapshot = null;
+        error = null;
+        failures = 0;
+        render();
+        pending = true;
+        return;
+      }
       if (!result || result.ok !== true) {
         fail(result || { code: "STATE_CORRUPT" });
       } else if (result.unchanged) {
         if (snapshot && result.sessionId === snapshot.sessionId && result.runId === snapshot.runId && result.revision === snapshot.revision) {
           error = null;
+          failures = 0;
           renderNotice();
         } else {
           // 无法将未变化响应绑定到本地快照时，清空身份提示并重新取完整结果。
           snapshot = null;
           error = { code: "STATE_CORRUPT" };
+          failures += 1;
           render();
         }
       } else if (validSnapshot(result)) {
         snapshot = result;
         error = null;
+        failures = 0;
         render();
       } else {
         fail({ code: "STATE_CORRUPT" });
@@ -292,12 +371,9 @@
     appearanceVersion++;
     if (visible()) applyAppearance(appearance);
   });
-  subscribe("session:activated", () => {
-    if (disposed) return;
-    epoch++;
-    snapshot = null;
-    error = null;
-    render();
+  // 宿主的回合结束事件会推给面板：批次结束立即刷新，不必等下一次轮询。
+  subscribe("session:turnEnded", () => {
+    if (disposed || !visible()) return;
     void refresh();
   });
   listen(document, "visibilitychange", () => {

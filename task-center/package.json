@@ -1,10 +1,12 @@
 {
   "name": "local-task-center",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test tests/state.test.mjs tests/storage.test.mjs tests/guard.test.mjs tests/panel.test.mjs",
+    "test:host": "node --test tests/host.test.mjs",
+    "test:all": "node --test tests/*.test.mjs",
     "check": "node --check main.js && node --check state.cjs && node --check storage.cjs && node --check extension/core.mjs && node --check extension/index.mjs && node --check renderer/panel.js"
   }
 }
