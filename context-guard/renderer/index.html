@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="pi-plugin-chrome" content="v2">
+  <title>续航压缩 · Context Guard</title>
+  <link rel="stylesheet" href="panel.css">
+  <script src="panel.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-icon" aria-hidden="true">↗</span><span><span data-i18n="brand">续航压缩</span> <small>CONTEXT GUARD</small></span></div>
+      <span class="version">v0.2.0</span>
+    </header>
+    <section class="hero">
+      <div><p class="eyebrow">LESS CONTEXT. MORE CONTINUITY.</p><h1 data-i18n="title">让长对话，继续。</h1><p class="intro" data-i18n="intro">使用系统自带 /compact 整理上下文，为长对话留出余量，再继续当前工作。</p></div>
+      <span id="savedBadge" class="badge">未启用</span>
+    </section>
+    <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+    <p id="catalogWarnings" class="notice" role="status" hidden></p>
+    <div class="layout">
+      <form id="settingsForm" class="card settings">
+        <div class="section-head"><div><p class="eyebrow">01 / RULES</p><h2 data-i18n="rules">配置续航规则</h2></div><label class="switch"><input id="enabled" type="checkbox" aria-label="启用续航压缩"><span></span></label></div>
+        <p class="muted" data-i18n="precision">默认关闭。系统模式可作用于所有主模型；指定模型时，供应商、完整模型 ID 与协议必须精确匹配。</p>
+        <label for="compressionMode" data-i18n="mode">压缩模式</label>
+        <select id="compressionMode"><option value="system" data-i18n="systemMode">系统原生压缩</option><option value="dedicated" data-i18n="dedicatedMode">独立摘要模型（高级）</option></select>
+        <p id="compatibility" class="notice compatibility" role="status" hidden></p>
+        <label for="sourceModel" data-i18n="mainModel">主模型</label>
+        <select id="sourceModel"><option value="" data-i18n="allModels">所有主模型（系统模式）</option></select>
+        <p id="sourceDetail" class="field-note mono">不限定主模型，使用当前会话的系统压缩。</p>
+        <label for="sourceApi" data-i18n="protocol">主模型协议</label>
+        <input id="sourceApi" list="apis" type="text" maxlength="256" value="openai-responses" spellcheck="false" disabled>
+        <datalist id="apis"><option value="openai-responses"><option value="openai-codex-responses"><option value="openai-completions"><option value="anthropic-messages"></datalist>
+        <p class="field-note" data-i18n="protocolHint">仅指定主模型时需要填写实际 API 标识；不匹配时跳过，不自动猜测。</p>
+        <div id="compressionFields" class="model-fields" hidden>
+          <label for="compressionModel" data-i18n="compressionModel">压缩专用模型</label>
+          <select id="compressionModel" disabled><option value="" data-i18n="choose">选择已配置的模型</option></select>
+          <p class="field-note" data-i18n="compressionHint">高级模式需要完整原生 SDK，并选择主模型、协议和摘要模型；普通 PI-Desktop 请使用系统原生压缩。摘要模型会产生正常用量。</p>
+        </div>
+        <div class="divider"></div>
+        <div class="threshold-row"><div><label for="threshold" data-i18n="threshold">提前压缩轮次</label><p class="field-note" data-i18n="thresholdHint">预留余量，默认第 90 轮尝试触发。</p></div><div class="number-wrap"><input id="threshold" type="number" value="90" min="2" max="98" step="1" required><span data-i18n="rounds">轮</span></div></div>
+        <p class="field-note" data-i18n="countHint">计数为插件记录，旧会话或重载后可能不完整，不含 HTTP 内部重试；手动系统压缩可为旧会话重建基线。</p>
+        <label class="checkbox-row" for="rescueOnLimit"><input id="rescueOnLimit" type="checkbox" checked><span data-i18n="rescue">达到会话轮次上限时自动救援</span></label>
+        <p class="field-note" data-i18n="rescueHint">需启用规则；检测到 session_turn_limit_exceeded 后自动调用系统压缩，不自动重发任务。</p>
+        <div class="form-footer"><span id="saveState" class="muted" role="status" aria-live="polite">配置仅保存在本机</span><button id="save" type="submit" class="primary" data-i18n="save">保存配置 ↗</button></div>
+      </form>
+      <aside class="right-column">
+        <section class="card status-card" aria-labelledby="statusTitle">
+          <div class="section-head"><div><p class="eyebrow">02 / LIVE SESSION</p><h2 id="statusTitle" data-i18n="session">当前会话</h2></div><button type="button" id="refresh" class="icon-button" aria-label="刷新状态（保留未保存配置）" title="刷新状态（保留未保存配置）">↻</button></div>
+          <div class="status-line" role="status" aria-live="polite"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="phase">等待扩展状态</span></div>
+          <div class="count"><strong id="count">—</strong><span>/ <span id="limit">90</span> <span data-i18n="rounds">轮</span></span></div>
+          <progress id="progress" max="90" value="0" aria-label="距压缩阈值的插件记录轮次"></progress>
+          <p id="runtimeMessage" class="muted" role="status" aria-live="polite">连接当前会话后显示插件计数。</p>
+          <dl class="status-meta"><div><dt data-i18n="currentSession">会话 ID</dt><dd id="runtimeSession" class="mono">—</dd></div><div><dt data-i18n="currentModel">当前主模型</dt><dd id="runtimeModel">—</dd></div><div><dt data-i18n="lastCompact">最近压缩</dt><dd id="lastCompact">—</dd></div><div><dt data-i18n="updated">状态更新</dt><dd id="updated">—</dd></div></dl>
+          <div class="manual-actions"><button type="button" id="compact" class="primary" disabled>立即系统压缩</button><p id="compactHint" class="field-note" role="status">连接会话后可手动调用系统 /compact。</p><p class="field-note" data-i18n="manualHint">只压缩，不发送消息。完成后可在会话中点击“继续”，不会自动重发任务；规则关闭时也可手动压缩。</p></div>
+          <p class="field-note refresh-note" data-i18n="refreshHint">刷新只更新会话状态，保留未保存配置；初始化失败时可点击刷新重试加载。</p>
+        </section>
+        <section class="card flow-card"><p class="eyebrow">HOW IT WORKS</p><h2 data-i18n="flow">压缩一下，接着工作。</h2><ol class="steps"><li><span>01</span><div><b data-i18n="step1">轮次接近阈值</b><p data-i18n="step1Hint">按插件记录预留余量，计数可能不完整。</p></div></li><li><span>02</span><div><b data-i18n="step2">调用系统原生压缩</b><p data-i18n="step2Hint">普通 PI-Desktop 可使用系统 /compact；高级摘要模式需要原生 SDK。</p></div></li><li><span>03</span><div><b data-i18n="step3">确认后继续工作</b><p data-i18n="step3Hint">查看压缩结果，再在会话中点击“继续”；插件不会自动重发任务。</p></div></li></ol></section>
+      </aside>
+    </div>
+    <footer class="bottom"><span data-i18n="inspired">设计参考 Save Xingchi 100 · 适配 PI-Desktop</span><span data-i18n="manual">系统压缩：上方按钮或会话中的 /compact</span></footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "local.context-guard",
+  "name": "续航压缩",
+  "version": "0.2.0",
+  "description": "使用 PI-Desktop 系统原生压缩延续长对话：记录模型轮次，在阈值或明确的 100 轮上限错误后请求压缩，并提供立即系统压缩按钮。与 /compact 使用同一宿主链路，不更改主模型、不自动重发任务。独立摘要模型保留为高级模式。",
+  "author": "local",
+  "license": "MIT",
+  "main": "main.cjs",
+  "ui": { "panel": "renderer/index.html", "title": "续航压缩" },
+  "categories": ["productivity", "developer-tools"],
+  "contributes": {
+    "commands": [
+      { "id": "context-guard.open", "title": "续航压缩：配置与状态", "keywords": ["压缩", "续航", "context", "compact", "100"] },
+      { "id": "context-guard.compact", "title": "续航压缩：立即系统压缩", "keywords": ["压缩", "compact", "100"] }
+    ],
+    "agentExtensions": ["extension/index.mjs"],
+    "settings": [
+      { "key": "enabled", "title": "启用自动续航压缩", "type": "boolean", "default": false, "scope": "plugin", "description": "默认使用系统原生压缩，无需选择专用摘要模型。关闭后仍可手动点击立即系统压缩。" },
+      { "key": "compressionMode", "title": "压缩方式", "type": "select", "default": "system", "scope": "plugin", "enum": [{ "label": "系统原生压缩（推荐）", "value": "system" }, { "label": "独立摘要模型（高级原生 SDK）", "value": "dedicated" }] },
+      { "key": "rescueOnLimit", "title": "轮次上限错误后自动系统压缩", "type": "boolean", "default": true, "scope": "plugin", "description": "仅在自动规则启用且错误明确为 session_turn_limit_exceeded 时生效；压缩后不自动重发任务。" },
+      { "key": "sourceProvider", "title": "主模型供应商 ID（系统模式可留空）", "type": "string", "default": "", "scope": "plugin" },
+      { "key": "sourceModelId", "title": "主模型完整 ID（系统模式可留空）", "type": "string", "default": "", "scope": "plugin" },
+      { "key": "sourceApi", "title": "主模型协议（筛选模型时精确匹配）", "type": "string", "default": "openai-responses", "scope": "plugin" },
+      { "key": "compressionProvider", "title": "高级模式：压缩模型供应商 ID", "type": "string", "default": "", "scope": "plugin" },
+      { "key": "compressionModelId", "title": "高级模式：压缩模型完整 ID", "type": "string", "default": "", "scope": "plugin" },
+      { "key": "threshold", "title": "提前请求压缩的轮次", "type": "number", "default": 90, "scope": "plugin", "description": "2–98 的整数，默认 90。为插件观测的模型轮次，旧会话可能不完整，不包括 HTTP 内部重试，也不是工具调用次数。" }
+    ]
+  },
+  "permissions": ["ui.panel", "models.list", "agent.extension", "desktop.control"],
+  "engines": { "piDesktop": ">=0.21.0" },
+  "activationEvents": ["onStartup", "onCommand:context-guard.open", "onCommand:context-guard.compact"],
+  "safetyNotes": "新增 desktop.control，用于 agent/getStatus 和 agent/compact 两个官方操作。压缩会使用宿主当前模型并产生正常模型用量，不修改模型配置、不调用 abort、不发送消息。agent.extension 仅记录轮次与错误类型、请求系统压缩并在插件私有目录保存状态；不保存对话正文、提示词或凭据。默认关闭自动规则；手动压缩由用户点击或命令触发。"
+}
